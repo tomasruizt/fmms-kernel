@@ -21,6 +21,9 @@ class Args(BaseSettings, cli_parse_args=True):
     n_runs_warmup: int = 10
     n_runs_benchmark: int = 1
 
+    n_hidden_states: int = 256
+    n_samples: int = 1
+
     def as_case(self) -> "Case":
         assert self.n_runs_warmup is not None
         assert self.n_runs_benchmark is not None
@@ -28,19 +31,14 @@ class Args(BaseSettings, cli_parse_args=True):
             name=self.name,
             n_runs_benchmark=self.n_runs_benchmark,
             n_runs_warmup=self.n_runs_warmup,
+            n_hidden_states=self.n_hidden_states,
+            n_samples=self.n_samples,
         )
 
 
 vocab_size = 256000
 hidden_size = 5120
-n_hidden_states = 256
-num_samples = 1
-speedtest_kwargs = dict(
-    hidden_states=torch.randn((hidden_size, n_hidden_states)).bfloat16(),
-    weights=torch.randn((vocab_size, hidden_size)).bfloat16(),
-    num_samples=num_samples,
-    temperature=1.0,
-)
+
 
 sample_compiled = torch.compile(sample)
 
@@ -51,11 +49,23 @@ class Case:
     n_runs_benchmark: int
     n_runs_warmup: int = 10
 
+    n_hidden_states: int = 256
+    n_samples: int = 1
+
+    def make_fn_kwargs(self) -> dict:
+        """This function can be slow because it allocates tensors."""
+        return dict(
+            hidden_states=torch.randn((hidden_size, self.n_hidden_states)).bfloat16(),
+            weights=torch.randn((vocab_size, hidden_size)).bfloat16(),
+            num_samples=self.n_samples,
+            temperature=1.0,
+        )
+
 
 fns = {
-    "fused-triton": lambda: fused_mm_sample_triton(**speedtest_kwargs, seed=0),
-    "naive-pt": lambda: sample(**speedtest_kwargs),
-    "naive-compiled": lambda: sample_compiled(**speedtest_kwargs),
+    "fused-triton": lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0),
+    "naive-pt": lambda **kwargs: sample(**kwargs),
+    "naive-compiled": lambda **kwargs: sample_compiled(**kwargs),
 }
 
 
@@ -69,16 +79,22 @@ all_cases = [
 def benchmark(case: Case) -> pd.DataFrame:
     print(f"Benchmarking fn='{case.name}'")
 
-    print("Warming up...")
     fn = fns[case.name]
+    kwargs = case.make_fn_kwargs()
+
+    print("Warming up...")
     for _ in range(case.n_runs_warmup):
-        fn()
+        fn(**kwargs)
     torch.cuda.synchronize()
 
     print("Timing...")
     start = time()
     with torch.cuda.nvtx.range("kernel"):
-        times = timeit.repeat(fn, repeat=case.n_runs_benchmark, number=1)
+        times = timeit.repeat(
+            lambda: fn(**kwargs),
+            repeat=case.n_runs_benchmark,
+            number=1,
+        )
         torch.cuda.synchronize()
     end = time()
     total_time = end - start
@@ -108,8 +124,8 @@ if __name__ == "__main__":
     df = benchmark_all(cases)
     print(f"{vocab_size=}")
     print(f"{hidden_size=}")
-    print(f"{n_hidden_states=}")
-    print(f"{num_samples=}")
+    print(f"{args.n_hidden_states=}")
+    print(f"{args.n_samples=}")
 
     total_runtimes = df.groupby(["name", "total[s]"], as_index=False).size()
     print(total_runtimes.round(2))
