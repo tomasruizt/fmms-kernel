@@ -1,6 +1,8 @@
 from pathlib import Path
-from fused_mm_sampling.core import sample
+
 import torch
+
+from fused_mm_sampling.core import sample
 
 torch.set_default_device("cuda")
 

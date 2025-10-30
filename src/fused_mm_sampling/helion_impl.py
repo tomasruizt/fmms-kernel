@@ -5,15 +5,15 @@ This module is separate from core to avoid making helion a required dependency.
 It is only used for performance comparisons.
 """
 
-import torch
 import helion
 import helion.language as hl
+import torch
 
 
 @helion.kernel(autotune_effort="none")
 def fused_sample_helion(weights: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
     assert weights.size(1) == hidden_states.size(0)
-    V, D = weights.size()
+    V, D = weights.size()  # noqa: N806
     seq_len = hidden_states.size(1)
     hl_seq_len = hl.specialize(seq_len)
 

@@ -11,4 +11,3 @@ __version__ = "0.1.0"
 __all__ = [
     "fused_mm_sample_triton",
 ]
-

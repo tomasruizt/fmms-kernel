@@ -1,10 +1,10 @@
 import os
 
+from fused_mm_sampling import fused_mm_sample_triton
+
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 import torch
-from fused_mm_sampling import fused_mm_sample_triton
-
 
 torch.set_default_device("cuda")
 

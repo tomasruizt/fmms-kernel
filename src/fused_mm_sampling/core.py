@@ -7,13 +7,13 @@ import triton.language as tl
 
 
 def sample(
-    weights: torch.Tensor,
-    hidden_states: torch.Tensor,
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [D, seq_len]
     num_samples: int,
     temperature: float,
     return_probs: bool = False,
 ):
-    logits = weights @ hidden_states  # [seq_len, V]
+    logits = weights @ hidden_states  # [V, seq_len]
     logits -= torch.max(logits, dim=0, keepdim=True).values
     probs = torch.nn.functional.softmax(logits / temperature, dim=0)  # [seq_len, V]
     samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
@@ -28,8 +28,8 @@ def incremental_sample_pt(
     num_samples: int,
     temperature: float,
 ):
-    V, D = weights.shape
-    D, seq_len = hidden_states.shape
+    V, D = weights.shape  # noqa: N806
+    D, seq_len = hidden_states.shape  # noqa: N806
     block_size = 8
     # compute logits blocks
     gumbel_max = float("-inf") * torch.ones(size=(num_samples, seq_len))
@@ -65,8 +65,8 @@ def fused_mm_sample_triton(
     temperature: float,
     seed: int,
 ):
-    V, D = weights.shape
-    D, seq_len = hidden_states.shape
+    V, D = weights.shape  # noqa: N806
+    D, seq_len = hidden_states.shape  # noqa: N806
 
     max_grid_size = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = float("-inf") * torch.ones(
@@ -130,9 +130,9 @@ def fused_mm_sample_triton_kernel(
     num_samples: tl.constexpr,
     temperature: float,
     seed: int,
-    BLOCK_SIZE_V: tl.constexpr,
-    BLOCK_SIZE_D: tl.constexpr,
-    SAMPLES_BSZ: tl.constexpr,
+    BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
+    BLOCK_SIZE_D: tl.constexpr,  # noqa: N803
+    SAMPLES_BSZ: tl.constexpr,  # noqa: N803
     seqlen_p2: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -177,9 +177,7 @@ def fused_mm_sample_triton_kernel(
         # Note: Creating appropriately sized tensors is tricky because
         # tl.arange() only accepts tl.constexpr that are powers of 2.
         noise_size: tl.constexpr = BLOCK_SIZE_V * seqlen_p2 * SAMPLES_BSZ
-        noise_offsets = tl.arange(0, noise_size).reshape(
-            (SAMPLES_BSZ, BLOCK_SIZE_V, seqlen_p2)
-        )
+        noise_offsets = tl.arange(0, noise_size).reshape((SAMPLES_BSZ, BLOCK_SIZE_V, seqlen_p2))
         # Note: Each program needs a different seed, otherwise they
         # all create the same noise, leading to sampling artifacts.
         # Also vary seed by batch_idx to ensure different noise per batch
@@ -197,8 +195,7 @@ def fused_mm_sample_triton_kernel(
         # Note: It makes a difference if indices are row-major or column-major
         # Note: The stride needs to match the non-padded shape!
         out_offsets = (
-            tl.arange(0, SAMPLES_BSZ)[:, None]
-            + num_samples * tl.arange(0, seqlen_p2)[None, :]
+            tl.arange(0, SAMPLES_BSZ)[:, None] + num_samples * tl.arange(0, seqlen_p2)[None, :]
         )
         out_mask = tl.arange(0, SAMPLES_BSZ)[:, None] < actual_batch_size
         tl.store(
@@ -211,5 +208,3 @@ def fused_mm_sample_triton_kernel(
             gumbel_max_idx_global,
             mask=out_mask,
         )
-
-
