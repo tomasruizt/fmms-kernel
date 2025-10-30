@@ -115,6 +115,7 @@ def fused_mm_sample_triton(
         for bsz in [1, 4]
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
+    cache_results=True,
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(

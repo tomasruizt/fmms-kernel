@@ -11,7 +11,7 @@ ncu-profile-fused-triton:
 	mkdir -p profiles/ncu
 	ncu --set full \
 		--launch-skip 10 \
-		--kernel-name fused_sample_triton_kernel \
+		--kernel-name fused_mm_sample_triton_kernel \
 		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton
 
 ncu-profile-naive-compiled:
