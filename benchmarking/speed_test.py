@@ -95,14 +95,8 @@ def benchmark(case: Case) -> pd.DataFrame:
 
 
 def benchmark_all(cases: list[Case]) -> pd.DataFrame:
-    import gc
-
-    gc.disable()
-    try:
-        dfs = [benchmark(case) for case in cases]
-        return pd.concat(dfs, ignore_index=True)
-    finally:
-        gc.enable()
+    dfs = [benchmark(case) for case in cases]
+    return pd.concat(dfs, ignore_index=True)
 
 
 if __name__ == "__main__":
