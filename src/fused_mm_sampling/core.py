@@ -77,9 +77,10 @@ def fused_mm_sample_triton(
     maxs_idx = torch.empty_like(maxs, dtype=torch.long)
 
     def grid(meta):
-        return (triton.cdiv(V, meta["BLOCK_SIZE_V"]),)
-
-    n_hidden_states_p2 = triton.next_power_of_2(n_hidden_states)
+        return (
+            triton.cdiv(V, meta["BLOCK_SIZE_V"]),
+            triton.cdiv(n_hidden_states, meta["BLOCK_SIZE_H"]),
+        )
 
     fused_mm_sample_triton_kernel[grid](
         weights_ptr=weights,
@@ -92,7 +93,6 @@ def fused_mm_sample_triton(
         num_samples=num_samples,
         temperature=temperature,
         seed=seed,
-        n_hidden_states_p2=n_hidden_states_p2,
     )
 
     # 2nd stage: reduction
@@ -107,12 +107,15 @@ def fused_mm_sample_triton(
             {
                 "BLOCK_SIZE_V": bv,
                 "BLOCK_SIZE_D": bd,
-                "N_SAMPLES_BSZ": bsz,
-            }
+                "BLOCK_SIZE_H": bh,
+                "BLOCK_SIZE_NSAMPLES": bsz,
+            },
+            maxnreg=255,
         )
         for bv in [MIN_BLOCK_SIZE_V, 32]
         for bd in [16, 32]
-        for bsz in [1, 4]
+        for bh in [64, 256]
+        for bsz in [1, 64]
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
     cache_results=True,
@@ -131,75 +134,83 @@ def fused_mm_sample_triton_kernel(
     seed: int,
     BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_D: tl.constexpr,  # noqa: N803
-    N_SAMPLES_BSZ: tl.constexpr,  # noqa: N803
-    n_hidden_states_p2: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,  # noqa: N803
+    BLOCK_SIZE_NSAMPLES: tl.constexpr,  # noqa: N803
 ):
-    pid = tl.program_id(axis=0)
-    block_start = pid * BLOCK_SIZE_V
+    pid_v = tl.program_id(axis=0)
+    pid_h = tl.program_id(axis=1)
+    v_start = pid_v * BLOCK_SIZE_V
+    h_start = pid_h * BLOCK_SIZE_H
 
     # We don't instantiate gumbel_max yet, because each program just writes
     # its local max into main memory for a parallel reduction in stage 2.
 
-    offsets_v = block_start + tl.arange(0, BLOCK_SIZE_V)
+    offsets_v = v_start + tl.arange(0, BLOCK_SIZE_V)
     mask_v = offsets_v < vocab_size
 
-    offset_seqlen = tl.arange(0, n_hidden_states)
-    logits_blk = tl.zeros((BLOCK_SIZE_V, n_hidden_states), dtype=tl.float32)
+    # H-tile within n_hidden_states
+    offsets_h = h_start + tl.arange(0, BLOCK_SIZE_H)
+    mask_h = offsets_h < n_hidden_states
+    logits_blk = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_H), dtype=tl.float32)
 
     # Compute a block of logits logits_blk
     for d_start in range(0, hidden_size, BLOCK_SIZE_D):
-        offsets_h = d_start + tl.arange(0, BLOCK_SIZE_D)
-        mask_h = offsets_h < hidden_size
+        offsets_d = d_start + tl.arange(0, BLOCK_SIZE_D)
+        mask_d = offsets_d < hidden_size
 
-        w_offsets = offsets_v[:, None] * hidden_size + offsets_h[None, :]
+        w_offsets = offsets_v[:, None] * hidden_size + offsets_d[None, :]
         w_blk = tl.load(
             weights_ptr + w_offsets,
-            mask=mask_v[:, None] & mask_h[None, :],
+            mask=mask_v[:, None] & mask_d[None, :],
         )
 
+        # load hidden_states tile [BLOCK_SIZE_D, BLOCK_SIZE_H]
         hidden_states_blk = tl.load(
-            hidden_states_ptr + offset_seqlen[None, :] + n_hidden_states * offsets_h[:, None],
-            mask=mask_h[:, None],
+            hidden_states_ptr + offsets_h[None, :] + n_hidden_states * offsets_d[:, None],
+            mask=mask_d[:, None] & mask_h[None, :],
         )
         logits_blk = tl.dot(w_blk, hidden_states_blk, acc=logits_blk)
 
     logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
 
     # Process samples in batches to limit memory usage
-    samples_n_batches: tl.constexpr = triton.cdiv(num_samples, N_SAMPLES_BSZ)
+    samples_n_batches: tl.constexpr = triton.cdiv(num_samples, BLOCK_SIZE_NSAMPLES)
     for batch_idx in range(samples_n_batches):
         # Calculate how many samples in this batch
-        batch_start = batch_idx * N_SAMPLES_BSZ
-        batch_end = min(batch_start + N_SAMPLES_BSZ, num_samples)
+        batch_start = batch_idx * BLOCK_SIZE_NSAMPLES
+        batch_end = min(batch_start + BLOCK_SIZE_NSAMPLES, num_samples)
         actual_batch_size = batch_end - batch_start
 
         # Note: Creating appropriately sized tensors is tricky because
         # tl.arange() only accepts tl.constexpr that are powers of 2.
-        noise_size: tl.constexpr = BLOCK_SIZE_V * n_hidden_states_p2 * N_SAMPLES_BSZ
+        noise_size: tl.constexpr = BLOCK_SIZE_V * BLOCK_SIZE_H * BLOCK_SIZE_NSAMPLES
         noise_offsets = tl.arange(0, noise_size).reshape(
-            (N_SAMPLES_BSZ, BLOCK_SIZE_V, n_hidden_states_p2)
+            (BLOCK_SIZE_NSAMPLES, BLOCK_SIZE_V, BLOCK_SIZE_H)
         )
-        # Note: Each program needs a different seed, otherwise they
-        # all create the same noise, leading to sampling artifacts.
-        # Also vary seed by batch_idx to ensure different noise per batch
-        unif_noise = tl.rand(seed + pid + batch_idx * 1000000, noise_offsets)
+        # Note: Each tile (v, h) and batch of samples needs a different seed,
+        # otherwise they all create the same noise, leading to sampling artifacts.
+        unif_noise = tl.rand(
+            seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
+            noise_offsets,
+        )
         gumbel_noise = -tl.log(-tl.log(unif_noise))
 
         gumbel_max, gumbel_max_idx_local = tl.max(
             logits_blk + gumbel_noise, axis=1, return_indices=True
-        )  # [batch_size_p2, n_hidden_states_p2]
-        gumbel_max_idx_global = gumbel_max_idx_local + block_start
+        )
+        gumbel_max_idx_global = gumbel_max_idx_local + v_start
 
         # Output offset for this batch
-        out_blk_start = pid * n_hidden_states * num_samples + batch_start
+        out_blk_start = pid_v * n_hidden_states * num_samples + batch_start
 
         # Note: It makes a difference if indices are row-major or column-major
         # Note: The stride needs to match the non-padded shape!
         out_offsets = (
-            tl.arange(0, N_SAMPLES_BSZ)[:, None]
-            + num_samples * tl.arange(0, n_hidden_states_p2)[None, :]
+            tl.arange(0, BLOCK_SIZE_NSAMPLES)[:, None]
+            + num_samples * (h_start + tl.arange(0, BLOCK_SIZE_H))[None, :]
         )
-        out_mask = tl.arange(0, N_SAMPLES_BSZ)[:, None] < actual_batch_size
+        mask_nsamples = tl.arange(0, BLOCK_SIZE_NSAMPLES) < actual_batch_size
+        out_mask = mask_nsamples[:, None] & mask_h[None, :]
         tl.store(
             max_out_ptr + out_blk_start + out_offsets,
             gumbel_max,
