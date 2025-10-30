@@ -12,7 +12,10 @@ def sample(
     num_samples: int,
     temperature: float,
     return_probs: bool = False,
+    seed: int = None,
 ):
+    if seed is not None:
+        torch.manual_seed(seed)
     logits = weights @ hidden_states  # [V, n_hidden_states]
     logits -= torch.max(logits, dim=0, keepdim=True).values
     probs = torch.nn.functional.softmax(logits / temperature, dim=0)  # [n_hidden_states, V]
@@ -55,7 +58,7 @@ def cdiv(n: int, div: int) -> int:
     return (n + div - 1) // div
 
 
-MIN_BLOCK_SIZE_V = 8
+MIN_BLOCK_SIZE_V = 32
 
 
 def fused_mm_sample_triton(
@@ -101,43 +104,19 @@ def fused_mm_sample_triton(
     return samples.squeeze(0)  # [n_hidden_states, num_samples]
 
 
-def early_prune_configs(configs, nargs, **kwargs):
-    # Discard configs where BLOCK_SIZE_NSAMPLES > num_samples.
-    num_samples = kwargs["num_samples"]
-    configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_NSAMPLES"] <= num_samples]
-
-    # Prevent including too small BLOCK_SIZE_NSAMPLES
-    if num_samples > 1:
-        configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_NSAMPLES"] > 1]
-
-    # Discard configs where BLOCK_SIZE_H > n_hidden_states.
-    n_hidden_states = kwargs["n_hidden_states"]
-    configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_H"] <= n_hidden_states]
-
-    # Prevent including too small BLOCK_SIZE_H
-    if n_hidden_states > 1:
-        configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_H"] > 1]
-    return configs
-
-
 @triton.autotune(
     configs=[
         triton.Config(
             {
-                "BLOCK_SIZE_V": bv,
-                "BLOCK_SIZE_D": bd,
-                "BLOCK_SIZE_H": bh,
-                "BLOCK_SIZE_NSAMPLES": bsz,
+                "BLOCK_SIZE_V": MIN_BLOCK_SIZE_V,
+                "BLOCK_SIZE_D": 32,
+                "BLOCK_SIZE_H": 4,
+                "BLOCK_SIZE_NSAMPLES": 4,
             },
             maxnreg=255,
         )
-        for bv in [MIN_BLOCK_SIZE_V, 32]
-        for bd in [16, 32]
-        for bh in [1, 64, 256]
-        for bsz in [1, 64]
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
-    prune_configs_by={"early_config_prune": early_prune_configs},
     cache_results=True,
 )
 @triton.jit
@@ -191,6 +170,9 @@ def fused_mm_sample_triton_kernel(
         )
         logits_blk = tl.dot(w_blk, hidden_states_blk, acc=logits_blk)
 
+    # Later we will take max over logits + noise, but rows outside the mask
+    # should not be considered. Setting them to -inf achieves this.
+    logits_blk = tl.where(mask_v[:, None], logits_blk, -float("inf"))
     logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
 
     # Process samples in batches to limit memory usage
