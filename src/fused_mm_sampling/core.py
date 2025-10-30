@@ -71,7 +71,7 @@ def fused_mm_sample_triton(
     max_grid_size = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = float("-inf") * torch.ones(
         (max_grid_size, n_hidden_states, num_samples),
-        dtype=torch.float32,
+        dtype=torch.bfloat16,
         device=weights.device,
     )
     maxs_idx = torch.empty_like(maxs, dtype=torch.long)
@@ -161,7 +161,7 @@ def fused_mm_sample_triton_kernel(
             hidden_states_ptr + offset_seqlen[None, :] + n_hidden_states * offsets_h[:, None],
             mask=mask_h[:, None],
         )
-        logits_blk += tl.dot(w_blk, hidden_states_blk)
+        logits_blk = tl.dot(w_blk, hidden_states_blk, acc=logits_blk)
 
     logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
 
