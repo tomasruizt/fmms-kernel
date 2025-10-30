@@ -101,6 +101,25 @@ def fused_mm_sample_triton(
     return samples.squeeze(0)  # [n_hidden_states, num_samples]
 
 
+def early_prune_configs(configs, nargs, **kwargs):
+    # Discard configs where BLOCK_SIZE_NSAMPLES > num_samples.
+    num_samples = kwargs["num_samples"]
+    configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_NSAMPLES"] <= num_samples]
+
+    # Prevent including too small BLOCK_SIZE_NSAMPLES
+    if num_samples > 1:
+        configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_NSAMPLES"] > 1]
+
+    # Discard configs where BLOCK_SIZE_H > n_hidden_states.
+    n_hidden_states = kwargs["n_hidden_states"]
+    configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_H"] <= n_hidden_states]
+
+    # Prevent including too small BLOCK_SIZE_H
+    if n_hidden_states > 1:
+        configs = [cfg for cfg in configs if cfg.kwargs["BLOCK_SIZE_H"] > 1]
+    return configs
+
+
 @triton.autotune(
     configs=[
         triton.Config(
@@ -114,10 +133,11 @@ def fused_mm_sample_triton(
         )
         for bv in [MIN_BLOCK_SIZE_V, 32]
         for bd in [16, 32]
-        for bh in [64, 256]
+        for bh in [1, 64, 256]
         for bsz in [1, 64]
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
+    prune_configs_by={"early_config_prune": early_prune_configs},
     cache_results=True,
 )
 @triton.jit
