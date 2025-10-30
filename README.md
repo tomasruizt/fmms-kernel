@@ -99,7 +99,7 @@ cd benchmarking
 make profile-mem
 ```
 
-This will generate a memory snapshot and HTML visualization in `mem-profiles/`.
+This will generate a memory snapshot and HTML visualization in `benchmarking/memory/`.
 
 ### NVIDIA Nsight Compute Profiling
 
