@@ -7,7 +7,8 @@ from time import time
 import timeit
 import pandas as pd
 import torch
-from fused_mm_sampling import fused_mm_sample_triton, sample
+from fused_mm_sampling import fused_mm_sample_triton
+from fused_mm_sampling.core import sample
 from pydantic_settings import BaseSettings
 
 torch.set_default_device("cuda")

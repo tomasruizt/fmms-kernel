@@ -1,0 +1,60 @@
+[project]
+name = "fused-mm-sampling"
+version = "0.1.0"
+description = "Efficient GPU implementations of fused matrix multiplication and sampling operations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Tomas Ruiz", email = "tomasruizt@users.noreply.github.com" }
+]
+keywords = ["pytorch", "triton", "gpu", "sampling", "matrix-multiplication"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "triton>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pandas>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+    "helion>=0.1.0",  # Only for benchmarking
+    "seaborn",
+]
+
+[project.urls]
+Homepage = "https://github.com/tomasruizt/fused-mm-sample"
+Repository = "https://github.com/tomasruizt/fused-mm-sample"
+Issues = "https://github.com/tomasruizt/fused-mm-sample/issues"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+fused_mm_sampling = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]  # Line too long (handled by formatter)
+

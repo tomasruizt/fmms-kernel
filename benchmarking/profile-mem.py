@@ -1,5 +1,5 @@
 from pathlib import Path
-from fused_mm_sampling import sample
+from fused_mm_sampling.core import sample
 import torch
 
 torch.set_default_device("cuda")
@@ -15,7 +15,7 @@ hidden_states = torch.randn((hidden_size, seq_len))
 weights = torch.randn((vocab_size, hidden_size))
 samples = sample(weights, hidden_states, num_samples=1, temperature=1.0)
 print(samples.shape)
-path = Path(__file__).parent / "mem-profiles" / "mem-snapshot.pickle"
+path = Path(__file__).parent / "profiles" / "memory" / "mem-snapshot.pickle"
 path.parent.mkdir(parents=True, exist_ok=True)
 torch.cuda.memory._dump_snapshot(path)
 
