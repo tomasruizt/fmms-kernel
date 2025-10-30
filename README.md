@@ -40,25 +40,25 @@ from fused_mm_sampling import fused_mm_sample_triton
 
 samples = fused_mm_sample_triton(
     weights=weights,        # [vocab_size, hidden_size]
-    hidden_states=hidden_states,  # [hidden_size, seq_len]
+    hidden_states=hidden_states,  # [hidden_size, n_hidden_states]
     num_samples=1,
     temperature=1.0,
     seed=42  # Optional: for reproducibility
 )
-# Returns: [seq_len, num_samples]
+# Returns: [n_hidden_states, num_samples]
 ```
 
 ### Parameters
 
 - **`weights`** (Tensor): Weight matrix of shape `[vocab_size, hidden_size]`
-- **`hidden_states`** (Tensor): Hidden states of shape `[hidden_size, seq_len]`
+- **`hidden_states`** (Tensor): Hidden states of shape `[hidden_size, n_hidden_states]`
 - **`num_samples`** (int): Number of samples to draw per sequence position
 - **`temperature`** (float): Temperature for sampling (higher = more random)
 - **`seed`** (int, optional): Random seed for reproducibility
 
 ### Returns
 
-- Tensor of shape `[seq_len, num_samples]` containing sampled indices
+- Tensor of shape `[n_hidden_states, num_samples]` containing sampled indices
 
 ## How It Works
 

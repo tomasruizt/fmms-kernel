@@ -33,10 +33,10 @@ class Args(BaseSettings, cli_parse_args=True):
 
 vocab_size = 256000
 hidden_size = 5120
-seq_len = 256
+n_hidden_states = 256
 num_samples = 1
 speedtest_kwargs = dict(
-    hidden_states=torch.randn((hidden_size, seq_len)).bfloat16(),
+    hidden_states=torch.randn((hidden_size, n_hidden_states)).bfloat16(),
     weights=torch.randn((vocab_size, hidden_size)).bfloat16(),
     num_samples=num_samples,
     temperature=1.0,
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     df = benchmark_all(cases)
     print(f"{vocab_size=}")
     print(f"{hidden_size=}")
-    print(f"{seq_len=}")
+    print(f"{n_hidden_states=}")
     print(f"{num_samples=}")
 
     total_runtimes = df.groupby(["name", "total[s]"], as_index=False).size()

@@ -10,17 +10,20 @@ torch.set_default_device("cuda")
 
 # Input dimensions (typical for large language models)
 vocab_size = 256_000
-hidden_size = 5120
-seq_len = 256
+hidden_size = 5120  # dimension of the hidden states
+# number of vectors in the hidden states
+# during batched sampling, this is the number of sequences in the batch
+n_hidden_states = 16
+
 
 print("Running example with:")
 print(f"  vocab_size = {vocab_size:,}")
 print(f"  hidden_size = {hidden_size:,}")
-print(f"  seq_len = {seq_len:,}")
+print(f"  n_hidden_states = {n_hidden_states:,}")
 
 # Create random inputs
 weights = torch.randn(vocab_size, hidden_size, dtype=torch.float32)
-hidden_states = torch.randn(hidden_size, seq_len, dtype=torch.float32)
+hidden_states = torch.randn(hidden_size, n_hidden_states, dtype=torch.float32)
 
 # Sample from categorical distribution using fused Triton kernel
 samples = fused_mm_sample_triton(

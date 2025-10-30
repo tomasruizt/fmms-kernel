@@ -14,14 +14,14 @@ import torch
 def fused_sample_helion(weights: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
     assert weights.size(1) == hidden_states.size(0)
     V, D = weights.size()  # noqa: N806
-    seq_len = hidden_states.size(1)
-    hl_seq_len = hl.specialize(seq_len)
+    n_hidden_states = hidden_states.size(1)
+    hl_n_hidden_states = hl.specialize(n_hidden_states)
 
-    gumbel_max = float("-inf") * torch.ones(seq_len, device=weights.device)
-    gumbel_max_idx = torch.empty(seq_len, dtype=torch.long, device=weights.device)
+    gumbel_max = float("-inf") * torch.ones(n_hidden_states, device=weights.device)
+    gumbel_max_idx = torch.empty(n_hidden_states, dtype=torch.long, device=weights.device)
 
     for tile_v in hl.tile(V):
-        logits_blk = hl.zeros([tile_v, hl_seq_len], dtype=torch.float32)
+        logits_blk = hl.zeros([tile_v, hl_n_hidden_states], dtype=torch.float32)
         for tile_d in hl.tile(D):
             mm = torch.matmul(weights[tile_v, tile_d], hidden_states[tile_d, :])
             logits_blk = logits_blk + mm
@@ -30,7 +30,7 @@ def fused_sample_helion(weights: torch.Tensor, hidden_states: torch.Tensor) -> t
         # https://github.com/pytorch/helion/issues/1041
         unif_noise = torch.rand_like(logits_blk, dtype=torch.float32)
         gumbel_noise = -(-unif_noise.log()).log()
-        # [num_samples, seq_len]
+        # [num_samples, n_hidden_states]
         summed = logits_blk + gumbel_noise
         new_max = hl.reduce(torch.max, summed, dim=0)
         new_max_idx_local = torch.argmax(summed, dim=0)

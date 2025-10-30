@@ -8,14 +8,14 @@ import triton.language as tl
 
 def sample(
     weights: torch.Tensor,  # [V, D]
-    hidden_states: torch.Tensor,  # [D, seq_len]
+    hidden_states: torch.Tensor,  # [D, n_hidden_states]
     num_samples: int,
     temperature: float,
     return_probs: bool = False,
 ):
-    logits = weights @ hidden_states  # [V, seq_len]
+    logits = weights @ hidden_states  # [V, n_hidden_states]
     logits -= torch.max(logits, dim=0, keepdim=True).values
-    probs = torch.nn.functional.softmax(logits / temperature, dim=0)  # [seq_len, V]
+    probs = torch.nn.functional.softmax(logits / temperature, dim=0)  # [n_hidden_states, V]
     samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
     if return_probs:
         return samples, probs
@@ -29,17 +29,17 @@ def incremental_sample_pt(
     temperature: float,
 ):
     V, D = weights.shape  # noqa: N806
-    D, seq_len = hidden_states.shape  # noqa: N806
+    D, n_hidden_states = hidden_states.shape  # noqa: N806
     block_size = 8
     # compute logits blocks
-    gumbel_max = float("-inf") * torch.ones(size=(num_samples, seq_len))
-    gumbel_max_idx = torch.empty(size=(num_samples, seq_len), dtype=torch.long)
+    gumbel_max = float("-inf") * torch.ones(size=(num_samples, n_hidden_states))
+    gumbel_max_idx = torch.empty(size=(num_samples, n_hidden_states), dtype=torch.long)
     n_blocks = cdiv(V, block_size)
     for blk_idx in range(n_blocks):
         idx_from = blk_idx * block_size
         idx_to = (blk_idx + 1) * block_size
         w_blk = weights[idx_from:idx_to]  # [block_size, D]
-        logits_blk = w_blk @ hidden_states / temperature  # [seq_len, block_size]
+        logits_blk = w_blk @ hidden_states / temperature  # [n_hidden_states, block_size]
         unif_noise = torch.rand((num_samples, *logits_blk.shape))
         gumbel_noise = -(-unif_noise.log()).log()
         new_max, new_max_idx_local = torch.max(logits_blk + gumbel_noise, dim=1)
@@ -66,11 +66,11 @@ def fused_mm_sample_triton(
     seed: int,
 ):
     V, D = weights.shape  # noqa: N806
-    D, seq_len = hidden_states.shape  # noqa: N806
+    D, n_hidden_states = hidden_states.shape  # noqa: N806
 
     max_grid_size = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = float("-inf") * torch.ones(
-        (max_grid_size, seq_len, num_samples),
+        (max_grid_size, n_hidden_states, num_samples),
         dtype=torch.float32,
         device=weights.device,
     )
@@ -79,7 +79,7 @@ def fused_mm_sample_triton(
     def grid(meta):
         return (triton.cdiv(V, meta["BLOCK_SIZE_V"]),)
 
-    seqlen_p2 = triton.next_power_of_2(seq_len)
+    n_hidden_states_p2 = triton.next_power_of_2(n_hidden_states)
 
     fused_mm_sample_triton_kernel[grid](
         weights_ptr=weights,
@@ -88,19 +88,17 @@ def fused_mm_sample_triton(
         max_out_idx_ptr=maxs_idx,
         vocab_size=V,
         hidden_size=D,
-        seq_len=seq_len,
+        n_hidden_states=n_hidden_states,
         num_samples=num_samples,
         temperature=temperature,
         seed=seed,
-        # BATCH_SIZE=MAX_SAMPLES_PER_BATCH,
-        # samples_bsz=samples_bsz,
-        seqlen_p2=seqlen_p2,
+        n_hidden_states_p2=n_hidden_states_p2,
     )
 
     # 2nd stage: reduction
     idxs = maxs.max(axis=0).indices
     samples = maxs_idx.gather(dim=0, index=idxs[None, :])
-    return samples.squeeze(0)  # [seq_len, num_samples]
+    return samples.squeeze(0)  # [n_hidden_states, num_samples]
 
 
 @triton.autotune(
@@ -109,31 +107,31 @@ def fused_mm_sample_triton(
             {
                 "BLOCK_SIZE_V": bv,
                 "BLOCK_SIZE_D": bd,
-                "SAMPLES_BSZ": bsz,
+                "N_SAMPLES_BSZ": bsz,
             }
         )
         for bv in [MIN_BLOCK_SIZE_V, 32]
         for bd in [16, 32]
         for bsz in [1, 4]
     ],
-    key=["vocab_size", "hidden_size", "seq_len", "num_samples"],
+    key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(
     weights_ptr,
     hidden_states_ptr,
-    max_out_ptr,  # [grid_size, seq_len, num_samples]
-    max_out_idx_ptr,  # [grid_size, seq_len, num_samples]
+    max_out_ptr,  # [grid_size, n_hidden_states, num_samples]
+    max_out_idx_ptr,  # [grid_size, n_hidden_states, num_samples]
     vocab_size,  # V
     hidden_size: tl.constexpr,  # D
-    seq_len: tl.constexpr,
+    n_hidden_states: tl.constexpr,
     num_samples: tl.constexpr,
     temperature: float,
     seed: int,
     BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_D: tl.constexpr,  # noqa: N803
-    SAMPLES_BSZ: tl.constexpr,  # noqa: N803
-    seqlen_p2: tl.constexpr,
+    N_SAMPLES_BSZ: tl.constexpr,  # noqa: N803
+    n_hidden_states_p2: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     block_start = pid * BLOCK_SIZE_V
@@ -144,8 +142,8 @@ def fused_mm_sample_triton_kernel(
     offsets_v = block_start + tl.arange(0, BLOCK_SIZE_V)
     mask_v = offsets_v < vocab_size
 
-    offset_seqlen = tl.arange(0, seq_len)
-    logits_blk = tl.zeros((BLOCK_SIZE_V, seq_len), dtype=tl.float32)
+    offset_seqlen = tl.arange(0, n_hidden_states)
+    logits_blk = tl.zeros((BLOCK_SIZE_V, n_hidden_states), dtype=tl.float32)
 
     # Compute a block of logits logits_blk
     for d_start in range(0, hidden_size, BLOCK_SIZE_D):
@@ -159,25 +157,27 @@ def fused_mm_sample_triton_kernel(
         )
 
         hidden_states_blk = tl.load(
-            hidden_states_ptr + offset_seqlen[None, :] + seq_len * offsets_h[:, None],
+            hidden_states_ptr + offset_seqlen[None, :] + n_hidden_states * offsets_h[:, None],
             mask=mask_h[:, None],
         )
         logits_blk += tl.dot(w_blk, hidden_states_blk)
 
-    logits_blk = logits_blk / temperature  # [Vblk, seq_len]
+    logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
 
     # Process samples in batches to limit memory usage
-    samples_n_batches: tl.constexpr = triton.cdiv(num_samples, SAMPLES_BSZ)
+    samples_n_batches: tl.constexpr = triton.cdiv(num_samples, N_SAMPLES_BSZ)
     for batch_idx in range(samples_n_batches):
         # Calculate how many samples in this batch
-        batch_start = batch_idx * SAMPLES_BSZ
-        batch_end = min(batch_start + SAMPLES_BSZ, num_samples)
+        batch_start = batch_idx * N_SAMPLES_BSZ
+        batch_end = min(batch_start + N_SAMPLES_BSZ, num_samples)
         actual_batch_size = batch_end - batch_start
 
         # Note: Creating appropriately sized tensors is tricky because
         # tl.arange() only accepts tl.constexpr that are powers of 2.
-        noise_size: tl.constexpr = BLOCK_SIZE_V * seqlen_p2 * SAMPLES_BSZ
-        noise_offsets = tl.arange(0, noise_size).reshape((SAMPLES_BSZ, BLOCK_SIZE_V, seqlen_p2))
+        noise_size: tl.constexpr = BLOCK_SIZE_V * n_hidden_states_p2 * N_SAMPLES_BSZ
+        noise_offsets = tl.arange(0, noise_size).reshape(
+            (N_SAMPLES_BSZ, BLOCK_SIZE_V, n_hidden_states_p2)
+        )
         # Note: Each program needs a different seed, otherwise they
         # all create the same noise, leading to sampling artifacts.
         # Also vary seed by batch_idx to ensure different noise per batch
@@ -186,18 +186,19 @@ def fused_mm_sample_triton_kernel(
 
         gumbel_max, gumbel_max_idx_local = tl.max(
             logits_blk + gumbel_noise, axis=1, return_indices=True
-        )  # [batch_size_p2, seqlen_p2]
+        )  # [batch_size_p2, n_hidden_states_p2]
         gumbel_max_idx_global = gumbel_max_idx_local + block_start
 
         # Output offset for this batch
-        out_blk_start = pid * seq_len * num_samples + batch_start
+        out_blk_start = pid * n_hidden_states * num_samples + batch_start
 
         # Note: It makes a difference if indices are row-major or column-major
         # Note: The stride needs to match the non-padded shape!
         out_offsets = (
-            tl.arange(0, SAMPLES_BSZ)[:, None] + num_samples * tl.arange(0, seqlen_p2)[None, :]
+            tl.arange(0, N_SAMPLES_BSZ)[:, None]
+            + num_samples * tl.arange(0, n_hidden_states_p2)[None, :]
         )
-        out_mask = tl.arange(0, SAMPLES_BSZ)[:, None] < actual_batch_size
+        out_mask = tl.arange(0, N_SAMPLES_BSZ)[:, None] < actual_batch_size
         tl.store(
             max_out_ptr + out_blk_start + out_offsets,
             gumbel_max,
