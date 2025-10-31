@@ -41,3 +41,32 @@ def fused_sample_helion(weights: torch.Tensor, hidden_states: torch.Tensor) -> t
         gumbel_max_idx[:] = torch.where(replace_mask, new_max_idx_global, gumbel_max_idx[:])
 
     return gumbel_max, gumbel_max_idx
+
+
+if __name__ == "__main__":
+    vocab_size = 100  # V
+    hidden_size = 10  # D
+    logits1 = torch.arange(-vocab_size / 2, vocab_size / 2)[None, :]  # [1, V]
+    logits2 = torch.arange(vocab_size / 2, -vocab_size / 2, step=-1)[None, :]  # [1, V]
+    logits = torch.cat([logits1, logits2], dim=0)  # [n_hidden_states, V]
+    n_hidden_states = logits.shape[0]
+    # use SVD to construct the hidden states that yield the logits
+    # use pseudoinverse to construct the weights.
+    # (there are many ways to do this, this is just one)
+    # W @ H = L.T
+    #  -> W = L.T @ H⁻¹
+    U, S, Vt = torch.linalg.svd(logits, full_matrices=False)
+    hidden_states = torch.cat(  # [D, n_hidden_states]
+        [
+            U.T,
+            torch.rand((hidden_size - n_hidden_states, n_hidden_states)),  # padding
+        ],
+    )
+    weights = logits.T @ torch.linalg.pinv(hidden_states)  # [V, D]
+    assert torch.allclose(weights @ hidden_states, logits.T)
+
+    # To bfloat 16
+    weights = weights.bfloat16()
+    hidden_states = hidden_states.bfloat16()
+
+    fused_sample_helion(weights, hidden_states)
