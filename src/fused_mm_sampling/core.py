@@ -17,8 +17,7 @@ def sample(
     if seed is not None:
         torch.manual_seed(seed)
     logits = weights @ hidden_states  # [V, n_hidden_states]
-    logits -= torch.max(logits, dim=0, keepdim=True).values
-    probs = torch.nn.functional.softmax(logits / temperature, dim=0)  # [n_hidden_states, V]
+    probs = (logits / temperature).softmax(dim=0)  # [V, n_hidden_states]
     samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
     if return_probs:
         return samples, probs
