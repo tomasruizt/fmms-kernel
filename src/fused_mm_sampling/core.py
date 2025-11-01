@@ -86,7 +86,7 @@ def fused_mm_sample_triton(
 
     fused_mm_sample_triton_kernel[grid](
         weights_ptr=weights,
-        hidden_states_ptr=hidden_states,
+        hidden_states_t_ptr=hidden_states.T.contiguous(),
         max_out_ptr=maxs,
         max_out_idx_ptr=maxs_idx,
         vocab_size=V,
@@ -120,8 +120,8 @@ def fused_mm_sample_triton(
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(
-    weights_ptr,
-    hidden_states_ptr,
+    weights_ptr,  # [V, D]
+    hidden_states_t_ptr,  # [n_hidden_states, D] (transposed)
     max_out_ptr,  # [grid_size, n_hidden_states, num_samples]
     max_out_idx_ptr,  # [grid_size, n_hidden_states, num_samples]
     vocab_size,  # V
@@ -162,12 +162,12 @@ def fused_mm_sample_triton_kernel(
             mask=mask_v[:, None] & mask_d[None, :],
         )
 
-        # load hidden_states tile [BLOCK_SIZE_D, BLOCK_SIZE_H]
+        # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
         hidden_states_blk = tl.load(
-            hidden_states_ptr + offsets_h[None, :] + n_hidden_states * offsets_d[:, None],
-            mask=mask_d[:, None] & mask_h[None, :],
+            hidden_states_t_ptr + offsets_d[None, :] + hidden_size * offsets_h[:, None],
+            mask=mask_h[:, None] & mask_d[None, :],
         )
-        logits_blk = tl.dot(w_blk, hidden_states_blk, acc=logits_blk)
+        logits_blk = tl.dot(w_blk, hidden_states_blk.T, acc=logits_blk)
 
     # Later we will take max over logits + noise, but rows outside the mask
     # should not be considered. Setting them to -inf achieves this.
