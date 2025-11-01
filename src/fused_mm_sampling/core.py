@@ -109,7 +109,7 @@ def fused_mm_sample_triton(
             {
                 "BLOCK_SIZE_V": MIN_BLOCK_SIZE_V,
                 "BLOCK_SIZE_D": 32,
-                "BLOCK_SIZE_H": 4,
+                "BLOCK_SIZE_H": 32,
                 "BLOCK_SIZE_NSAMPLES": 4,
             },
             maxnreg=255,
