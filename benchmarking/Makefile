@@ -7,11 +7,22 @@ download-html-conversion-tool:
 	wget https://raw.githubusercontent.com/pytorch/pytorch/refs/heads/main/torch/cuda/_memory_viz.py
 
 
+speed-test:
+	python speed_test.py
+
+# NCU profiling targets:
+# --import-source yes: Embeds source code into the .ncu-rep file, allowing it to be
+#   viewed on a different machine without path remapping. The source is embedded
+#   regardless of where you open the report.
+# --source-folders: Comma-separated search paths for source files to import into report.
+#   For Triton kernels, this helps NCU find the Python source files.
 ncu-profile-fused-triton:
 	mkdir -p profiles/ncu
 	ncu --set full \
 		--launch-skip 10 \
 		--kernel-name fused_mm_sample_triton_kernel \
+		--source-folders $$(pwd)/../src/fused_mm_sampling \
+		--import-source yes \
 		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton
 
 ncu-profile-naive-compiled:

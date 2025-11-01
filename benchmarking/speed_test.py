@@ -37,7 +37,7 @@ class Args(BaseSettings, cli_parse_args=True):
 
 
 vocab_size = 256000
-hidden_size = 5120
+hidden_size = 8192
 
 
 sample_compiled = torch.compile(sample)
@@ -55,8 +55,8 @@ class Case:
     def make_fn_kwargs(self) -> dict:
         """This function can be slow because it allocates tensors."""
         return dict(
-            hidden_states=torch.randn((hidden_size, self.n_hidden_states)).bfloat16(),
-            weights=torch.randn((vocab_size, hidden_size)).bfloat16(),
+            hidden_states=torch.randn((hidden_size, self.n_hidden_states), dtype=torch.bfloat16),
+            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16),
             num_samples=self.n_samples,
             temperature=1.0,
         )
