@@ -137,13 +137,11 @@ def fused_mm_sample_triton_kernel(
     BLOCK_SIZE_NSAMPLES: tl.constexpr,  # noqa: N803
     GROUP_SIZE_V: tl.constexpr,  # noqa: N803
 ):
-    pid_v, pid_h = compute_pids(
-        vocab_size,
-        n_hidden_states,
-        BLOCK_SIZE_V,
-        BLOCK_SIZE_H,
-        GROUP_SIZE_V,
-    )
+    # Compute a different program ordering to exploit L2 cache, as suggested in
+    # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
+    pid_v = tl.program_id(axis=0)
+    pid_h = tl.program_id(axis=1)
+    pid_v, pid_h = tl.swizzle2d(pid_v, pid_h, vocab_size, n_hidden_states, GROUP_SIZE_V)
     v_start = pid_v * BLOCK_SIZE_V
     h_start = pid_h * BLOCK_SIZE_H
 
@@ -229,27 +227,3 @@ def fused_mm_sample_triton_kernel(
             gumbel_max_idx_global,
             mask=out_mask,
         )
-
-
-@triton.jit
-def compute_pids(
-    vocab_size: tl.constexpr,
-    n_hidden_states: tl.constexpr,
-    BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
-    BLOCK_SIZE_H: tl.constexpr,  # noqa: N803
-    GROUP_SIZE_V: tl.constexpr,  # noqa: N803
-):
-    # Taken from https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
-    # -----------------------------------------------------------
-    # Map program ids `pid` to the block of logits it should compute.
-    # This is done in a grouped ordering to promote L2 data reuse.
-    pid = tl.program_id(axis=0)
-    num_pid_v = tl.cdiv(vocab_size, BLOCK_SIZE_V)
-    num_pid_h = tl.cdiv(n_hidden_states, BLOCK_SIZE_H)
-    num_pid_in_group = GROUP_SIZE_V * num_pid_h
-    group_id = pid // num_pid_in_group
-    first_pid_v = group_id * GROUP_SIZE_V
-    group_size_v = min(num_pid_v - first_pid_v, GROUP_SIZE_V)
-    pid_v = first_pid_v + ((pid % num_pid_in_group) % group_size_v)
-    pid_h = (pid % num_pid_in_group) // group_size_v
-    return pid_v, pid_h
