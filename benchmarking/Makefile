@@ -45,6 +45,12 @@ nsight-profile-naive-compiled:
 		--force-overwrite true \
 		-o profiles/nsight/naive-compiled python ./speed_test.py --name naive-compiled
 
+nsight-profile-naive-pt:
+	mkdir -p profiles/nsight
+	nsys profile \
+		--force-overwrite true \
+		-o profiles/nsight/naive-pt python ./speed_test.py --name naive-pt
+
 ncu-export-fused-triton:
 	mkdir -p profiles/ncu-txt
 	ncu --set full \
