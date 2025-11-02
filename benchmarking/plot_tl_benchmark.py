@@ -26,13 +26,13 @@ def create_benchmark(mode: str):
         # Scale over batch size (n_hidden_states)
         config = triton.testing.Benchmark(
             x_names=["n_hidden_states"],
-            x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512],
+            x_vals=[1, 4, 16, 32, 64, 128, 256, 512, 1024],
             x_log=True,
             line_arg="provider",
             line_vals=["fused-triton", "naive-pt", "naive-compiled"],
             line_names=["Fused Triton", "Naive PyTorch", "Naive Compiled"],
             styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
-            ylabel="Time (ms)",
+            ylabel="Samples/ms",
             plot_name="fused-mm-sample-batch-scaling",
             args={},
         )
@@ -42,7 +42,12 @@ def create_benchmark(mode: str):
             # Prepare inputs with fixed vocab_size, varying batch
             hidden_states = torch.randn((HIDDEN_SIZE, n_hidden_states), dtype=torch.bfloat16)
             weights = torch.randn((BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16)
-            return _run_benchmark(hidden_states, weights, provider)
+            ms, min_ms, max_ms = _run_benchmark(hidden_states, weights, provider)
+            total_n_samples = n_hidden_states * N_SAMPLES
+            samples_per_ms = total_n_samples / ms
+            max_samples_per_ms = total_n_samples / min_ms
+            min_samples_per_ms = total_n_samples / max_ms
+            return samples_per_ms, min_samples_per_ms, max_samples_per_ms
 
     elif mode == "vocab":
         # Scale over vocabulary size
@@ -132,7 +137,7 @@ if __name__ == "__main__":
         print("Configuration:")
         if mode == "batch":
             print(f"  vocab_size: {BASE_VOCAB_SIZE} (fixed)")
-            print("  n_hidden_states: 1 → 256 (scaling)")
+            print("  n_hidden_states: 1 → 1024 (scaling)")
         else:  # vocab mode
             print(f"  vocab_size: {BASE_VOCAB_SIZE} → {BASE_VOCAB_SIZE // 16} (scaling)")
             print("  n_hidden_states: 256 (fixed)")
