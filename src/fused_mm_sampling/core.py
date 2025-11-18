@@ -1,6 +1,8 @@
 # import os
 
 # os.environ["TRITON_INTERPRET"] = "1"
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -227,3 +229,28 @@ def fused_mm_sample_triton_kernel(
             gumbel_max_idx_global,
             mask=out_mask,
         )
+
+
+@torch.compile
+def sample_jl_pt(
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [D, n_hidden_states]
+    k: int,
+    temperature: float,
+    num_samples: int,
+    seed: int = None,
+):
+    """
+    Sampling using low-dimensional random projections (Johnson-Lindenstrauss lemma).
+    """
+    device = weights.device
+    if seed is not None:
+        torch.manual_seed(seed)
+    D = weights.shape[1]  # noqa: N806
+    rand_mat = torch.randn((D, k), dtype=weights.dtype, device=device) / math.sqrt(k)
+    w_p = weights @ rand_mat  # [V, k]
+    h_p = rand_mat.T @ hidden_states  # [k, n_hidden_states]
+    logits_p = w_p @ h_p  # [V, n_hidden_states]
+    probs = (logits_p / temperature).softmax(dim=0)  # [V, n_hidden_states]
+    samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
+    return samples
