@@ -2,6 +2,8 @@
 
 # os.environ["TRITON_INTERPRET"] = "1"
 import math
+from dataclasses import dataclass
+from typing import Callable, Protocol
 
 import torch
 import triton
@@ -231,26 +233,61 @@ def fused_mm_sample_triton_kernel(
         )
 
 
-@torch.compile
-def sample_jl_pt(
-    weights: torch.Tensor,  # [V, D]
-    hidden_states: torch.Tensor,  # [D, n_hidden_states]
-    k: int,
-    temperature: float,
-    num_samples: int,
-    seed: int = None,
-):
-    """
-    Sampling using low-dimensional random projections (Johnson-Lindenstrauss lemma).
-    """
-    device = weights.device
-    if seed is not None:
-        torch.manual_seed(seed)
-    D = weights.shape[1]  # noqa: N806
-    rand_mat = torch.randn((D, k), dtype=weights.dtype, device=device) / math.sqrt(k)
-    w_p = weights @ rand_mat  # [V, k]
-    h_p = rand_mat.T @ hidden_states  # [k, n_hidden_states]
-    logits_p = w_p @ h_p  # [V, n_hidden_states]
-    probs = (logits_p / temperature).softmax(dim=0)  # [V, n_hidden_states]
-    samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
-    return samples
+class Sampler(Protocol):
+    def prepare(self) -> "Sampler":
+        raise NotImplementedError()
+
+    def sample(self, **kwargs) -> torch.Tensor:
+        raise NotImplementedError()
+
+
+@dataclass
+class SimpleSampler(Sampler):
+    fn: Callable[..., torch.Tensor]
+
+    def prepare(self) -> "SimpleSampler":
+        return self
+
+    def sample(self, **kwargs) -> torch.Tensor:
+        return self.fn(**kwargs)
+
+
+@dataclass
+class JLSampler(Sampler):
+    weights: torch.Tensor  # [V, D]
+    k: int
+    prepared: bool = False
+
+    def prepare(self) -> "JLSampler":
+        D = self.weights.shape[1]  # noqa: N806
+        self.rand_mat = torch.randn(
+            (D, self.k),
+            dtype=self.weights.dtype,
+            device=self.weights.device,
+        ) / math.sqrt(self.k)
+        self.w_p = self.weights @ self.rand_mat  # [V, k]
+        self.prepared = True
+        self.weights = None  # not needed anymore
+        return self
+
+    @torch.compile
+    def sample(
+        self,
+        hidden_states: torch.Tensor,  # [D, n_hidden_states]
+        temperature: float,
+        num_samples: int,
+        seed: int = None,
+        weights: torch.Tensor = None,  # ignored
+    ):
+        """
+        Sampling using low-dimensional random projections (Johnson-Lindenstrauss lemma).
+        """
+        if not self.prepared:
+            raise ValueError("Sampler not prepared. Call .prepare() first.")
+        if seed is not None:
+            torch.manual_seed(seed)
+        h_p = self.rand_mat.T @ hidden_states  # [k, n_hidden_states]
+        logits_p = self.w_p @ h_p  # [V, n_hidden_states]
+        probs = (logits_p / temperature).softmax(dim=0)  # [V, n_hidden_states]
+        samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
+        return samples

@@ -6,7 +6,12 @@ import torch
 import triton
 
 from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import sample, sample_jl_pt
+from fused_mm_sampling.core import (
+    JLSampler,
+    Sampler,
+    SimpleSampler,
+    sample,
+)
 
 torch.set_default_device("cuda")
 
@@ -79,6 +84,7 @@ def create_benchmark(mode: str):
 
 def _run_benchmark(hidden_states, weights, provider):
     """Common benchmark logic for all modes."""
+    print(f"Running benchmark for provider: {provider}")
 
     kwargs = dict(
         hidden_states=hidden_states,
@@ -87,33 +93,23 @@ def _run_benchmark(hidden_states, weights, provider):
         temperature=TEMPERATURE,
     )
 
-    # Select the function based on provider
-    def run_fused_triton():
-        return fused_mm_sample_triton(**kwargs, seed=0)
-
-    def run_naive_pt():
-        return sample(**kwargs)
-
-    def run_naive_compiled():
-        return sample_compiled(**kwargs)
-
-    def run_jl_compiled():
-        return sample_jl_pt(**kwargs, k=100)
-
-    mapping = {
-        "fused-triton": run_fused_triton,
-        "naive-pt": run_naive_pt,
-        "naive-compiled": run_naive_compiled,
-        "jl-compiled": run_jl_compiled,
+    # Select the sampler based on provider
+    mapping: dict[str, Sampler] = {
+        "fused-triton": SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0)),
+        "naive-pt": SimpleSampler(sample),
+        "naive-compiled": SimpleSampler(sample_compiled),
+        "jl-compiled": JLSampler(weights, k=100),
     }
-    fn = mapping[provider]
+    sampler = mapping[provider]
+    sampler.prepare()
 
-    # Warmup
+    def fn():
+        return sampler.sample(**kwargs)
+
     for _ in range(10):
         fn()
     torch.cuda.synchronize()
 
-    # Benchmark
     quantiles = [0.1, 0.5, 0.9]
     ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
 

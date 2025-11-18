@@ -11,7 +11,12 @@ import torch
 from pydantic_settings import BaseSettings
 
 from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import sample, sample_jl_pt
+from fused_mm_sampling.core import (
+    JLSampler,
+    Sampler,
+    SimpleSampler,
+    sample,
+)
 
 torch.set_default_device("cuda")
 
@@ -62,14 +67,6 @@ class Case:
         )
 
 
-fns = {
-    "fused-triton": lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0),
-    "naive-pt": lambda **kwargs: sample(**kwargs),
-    "naive-compiled": lambda **kwargs: sample_compiled(**kwargs),
-    "jl-compiled": lambda **kwargs: sample_jl_pt(**kwargs, k=100),
-}
-
-
 all_cases = [
     Case(name="fused-triton", n_runs_benchmark=10),
     Case(name="naive-pt", n_runs_benchmark=10),
@@ -79,14 +76,22 @@ all_cases = [
 
 
 def benchmark(case: Case) -> pd.DataFrame:
-    print(f"Benchmarking fn='{case.name}'")
-
-    fn = fns[case.name]
     kwargs = case.make_fn_kwargs()
+    samplers: dict[str, Sampler] = {
+        "fused-triton": SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0)),
+        "naive-pt": SimpleSampler(sample),
+        "naive-compiled": SimpleSampler(sample_compiled),
+        "jl-compiled": JLSampler(kwargs["weights"], k=100),
+    }
+    sampler = samplers[case.name]
+    sampler.prepare()
+
+    def fn():
+        return sampler.sample(**kwargs)
 
     print("Warming up...")
     for _ in range(case.n_runs_warmup):
-        fn(**kwargs)
+        fn()
     torch.cuda.synchronize()
 
     print("Timing...")
@@ -95,7 +100,7 @@ def benchmark(case: Case) -> pd.DataFrame:
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
-        timeit.timeit(lambda: fn(**kwargs), number=1)
+        timeit.timeit(fn, number=1)
         end_event.record()
         end_event.synchronize()
         ms_elapsed = start_event.elapsed_time(end_event)
