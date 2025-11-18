@@ -5,14 +5,13 @@ os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 import timeit
 from dataclasses import dataclass
-from time import time
 
 import pandas as pd
 import torch
 from pydantic_settings import BaseSettings
 
 from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import sample
+from fused_mm_sampling.core import sample, sample_jl_pt
 
 torch.set_default_device("cuda")
 
@@ -67,6 +66,7 @@ fns = {
     "fused-triton": lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0),
     "naive-pt": lambda **kwargs: sample(**kwargs),
     "naive-compiled": lambda **kwargs: sample_compiled(**kwargs),
+    "jl-compiled": lambda **kwargs: sample_jl_pt(**kwargs, k=100),
 }
 
 
@@ -74,6 +74,7 @@ all_cases = [
     Case(name="fused-triton", n_runs_benchmark=10),
     Case(name="naive-pt", n_runs_benchmark=10),
     Case(name="naive-compiled", n_runs_benchmark=10),
+    Case(name="jl-compiled", n_runs_benchmark=10),
 ]
 
 
@@ -89,23 +90,23 @@ def benchmark(case: Case) -> pd.DataFrame:
     torch.cuda.synchronize()
 
     print("Timing...")
-    start = time()
-    with torch.cuda.nvtx.range("kernel"):
-        times = timeit.repeat(
-            lambda: fn(**kwargs),
-            repeat=case.n_runs_benchmark,
-            number=1,
-        )
-        torch.cuda.synchronize()
-    end = time()
-    total_time = end - start
-    # According to time.repeat() the min() is the most informative statistic
+    times_ms = []
+    for _ in range(case.n_runs_benchmark):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+        timeit.timeit(lambda: fn(**kwargs), number=1)
+        end_event.record()
+        end_event.synchronize()
+        ms_elapsed = start_event.elapsed_time(end_event)
+        times_ms.append(ms_elapsed)
+
     results = {
         "name": case.name,
-        "total[s]": total_time,
-        "time[s]": times,
-        "time[ms]": [t * 1_000 for t in times],
-        "time[µs]": [t * 1_000_000 for t in times],
+        "total[s]": sum(times_ms) / 1_000,
+        "time[s]": [t / 1_000 for t in times_ms],
+        "time[ms]": times_ms,
+        "time[µs]": [t * 1_000 for t in times_ms],
     }
     df = pd.DataFrame(results)
     return df
