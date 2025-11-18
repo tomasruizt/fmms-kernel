@@ -6,7 +6,7 @@ import torch
 import triton
 
 from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import sample
+from fused_mm_sampling.core import sample, sample_jl_pt
 
 torch.set_default_device("cuda")
 
@@ -29,9 +29,9 @@ def create_benchmark(mode: str):
             x_vals=[1, 4, 16, 32, 64, 128, 256, 512, 1024],
             x_log=True,
             line_arg="provider",
-            line_vals=["fused-triton", "naive-pt", "naive-compiled"],
-            line_names=["Fused Triton", "Naive PyTorch", "Naive Compiled"],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
+            line_vals=["fused-triton", "naive-pt", "naive-compiled", "jl-compiled"],
+            line_names=["Fused Triton", "Naive PyTorch", "Naive Compiled", "JL Compiled"],
+            styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-")],
             ylabel="Samples/ms",
             plot_name="fused-mm-sample-batch-scaling",
             args={},
@@ -56,9 +56,9 @@ def create_benchmark(mode: str):
             x_vals=[250_000, 200_000, 175_000, 150_000, 125_000, 100_000, 80_000, 64_000],
             x_log=True,
             line_arg="provider",
-            line_vals=["fused-triton", "naive-pt", "naive-compiled"],
-            line_names=["Fused Triton", "Naive PyTorch", "Naive Compiled"],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-")],
+            line_vals=["fused-triton", "naive-pt", "naive-compiled", "jl-compiled"],
+            line_names=["Fused Triton", "Naive PyTorch", "Naive Compiled", "JL Compiled"],
+            styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-")],
             ylabel="Time (ms)",
             plot_name="fused-mm-sample-vocab-scaling",
             args={},
@@ -80,40 +80,33 @@ def create_benchmark(mode: str):
 def _run_benchmark(hidden_states, weights, provider):
     """Common benchmark logic for all modes."""
 
+    kwargs = dict(
+        hidden_states=hidden_states,
+        weights=weights,
+        num_samples=N_SAMPLES,
+        temperature=TEMPERATURE,
+    )
+
     # Select the function based on provider
     def run_fused_triton():
-        return fused_mm_sample_triton(
-            hidden_states=hidden_states,
-            weights=weights,
-            num_samples=N_SAMPLES,
-            temperature=TEMPERATURE,
-            seed=0,
-        )
+        return fused_mm_sample_triton(**kwargs, seed=0)
 
     def run_naive_pt():
-        return sample(
-            hidden_states=hidden_states,
-            weights=weights,
-            num_samples=N_SAMPLES,
-            temperature=TEMPERATURE,
-        )
+        return sample(**kwargs)
 
     def run_naive_compiled():
-        return sample_compiled(
-            hidden_states=hidden_states,
-            weights=weights,
-            num_samples=N_SAMPLES,
-            temperature=TEMPERATURE,
-        )
+        return sample_compiled(**kwargs)
 
-    if provider == "fused-triton":
-        fn = run_fused_triton
-    elif provider == "naive-pt":
-        fn = run_naive_pt
-    elif provider == "naive-compiled":
-        fn = run_naive_compiled
-    else:
-        raise ValueError("Unknown provider: " + provider)
+    def run_jl_compiled():
+        return sample_jl_pt(**kwargs, k=100)
+
+    mapping = {
+        "fused-triton": run_fused_triton,
+        "naive-pt": run_naive_pt,
+        "naive-compiled": run_naive_compiled,
+        "jl-compiled": run_jl_compiled,
+    }
+    fn = mapping[provider]
 
     # Warmup
     for _ in range(10):
