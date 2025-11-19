@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+import flashinfer
 import torch
 import triton
 import triton.language as tl
@@ -34,19 +35,22 @@ def incremental_sample_pt(
     num_samples: int,
     temperature: float,
 ):
+    device = weights.device
     V, D = weights.shape  # noqa: N806
     D, n_hidden_states = hidden_states.shape  # noqa: N806
     block_size = 8
     # compute logits blocks
-    gumbel_max = float("-inf") * torch.ones(size=(num_samples, n_hidden_states))
-    gumbel_max_idx = torch.empty(size=(num_samples, n_hidden_states), dtype=torch.long)
+    gumbel_max = float("-inf") * torch.ones(size=(num_samples, n_hidden_states), device=device)
+    gumbel_max_idx = torch.empty(
+        size=(num_samples, n_hidden_states), dtype=torch.long, device=device
+    )
     n_blocks = cdiv(V, block_size)
     for blk_idx in range(n_blocks):
         idx_from = blk_idx * block_size
         idx_to = (blk_idx + 1) * block_size
         w_blk = weights[idx_from:idx_to]  # [block_size, D]
         logits_blk = w_blk @ hidden_states / temperature  # [n_hidden_states, block_size]
-        unif_noise = torch.rand((num_samples, *logits_blk.shape))
+        unif_noise = torch.rand((num_samples, *logits_blk.shape), device=device)
         gumbel_noise = -(-unif_noise.log()).log()
         new_max, new_max_idx_local = torch.max(logits_blk + gumbel_noise, dim=1)
         new_max_idx_global = idx_from + new_max_idx_local
@@ -329,3 +333,28 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
             return JLSampler.from_weights(weights)
         case _:
             raise NotImplementedError()
+
+
+@torch.compile
+def flashinfer_dualpivot_sampler(
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [D, n_hidden_states]
+    num_samples: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+) -> torch.Tensor:
+    device = weights.device
+    batch_size = hidden_states.shape[1]
+    logits = weights @ hidden_states  # [V, n_hidden_states]
+    logits = logits / temperature
+    indices = torch.repeat_interleave(
+        torch.arange(batch_size, device=device, dtype=torch.int32), num_samples
+    )
+    result = flashinfer.sampling.top_k_top_p_sampling_from_logits(
+        logits=logits.T.contiguous(),
+        top_k=top_k,
+        top_p=top_p,
+        indices=indices,
+    )
+    return result.reshape(batch_size, num_samples)
