@@ -331,12 +331,19 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
             return SimpleSampler(torch.compile(sample))
         case "jl-compiled":
             return JLSampler.from_weights(weights)
+        case "flashinfer:top_k_top_p_sampling_from_logits":
+            return SimpleSampler(
+                lambda **kwargs: flashinfer_top_k_top_p_sampling_from_logits(
+                    **kwargs, top_p=1.0, top_k=100
+                )
+            )
+        case "flashinfer:sampling_from_logits":
+            return SimpleSampler(flashinfer_sampling_from_logits)
         case _:
             raise NotImplementedError()
 
 
-@torch.compile
-def flashinfer_dualpivot_sampler(
+def flashinfer_top_k_top_p_sampling_from_logits(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [D, n_hidden_states]
     num_samples: int,
@@ -355,6 +362,26 @@ def flashinfer_dualpivot_sampler(
         logits=logits.T.contiguous(),
         top_k=top_k,
         top_p=top_p,
+        indices=indices,
+    )
+    return result.reshape(batch_size, num_samples)
+
+
+def flashinfer_sampling_from_logits(
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [D, n_hidden_states]
+    num_samples: int,
+    temperature: float,
+) -> torch.Tensor:
+    device = weights.device
+    batch_size = hidden_states.shape[1]
+    logits = weights @ hidden_states  # [V, n_hidden_states]
+    logits = logits / temperature
+    indices = torch.repeat_interleave(
+        torch.arange(batch_size, device=device, dtype=torch.int32), num_samples
+    )
+    result = flashinfer.sampling.sampling_from_logits(
+        logits=logits.T.contiguous(),
         indices=indices,
     )
     return result.reshape(batch_size, num_samples)

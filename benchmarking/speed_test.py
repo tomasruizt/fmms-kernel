@@ -45,7 +45,7 @@ sample_compiled = torch.compile(sample)
 @dataclass
 class Case:
     name: str
-    n_runs_benchmark: int
+    n_runs_benchmark: int = 10
     n_runs_warmup: int = 10
 
     n_hidden_states: int = 256
@@ -64,10 +64,12 @@ class Case:
 
 
 all_cases = [
-    Case(name="fused-triton", n_runs_benchmark=10),
-    Case(name="naive-pt", n_runs_benchmark=10),
-    Case(name="naive-compiled", n_runs_benchmark=10),
-    Case(name="jl-compiled", n_runs_benchmark=10),
+    Case(name="fused-triton"),
+    # Case(name="naive-pt"),
+    Case(name="naive-compiled"),
+    Case(name="jl-compiled"),
+    Case(name="flashinfer:top_k_top_p_sampling_from_logits"),
+    Case(name="flashinfer:sampling_from_logits"),
 ]
 
 
