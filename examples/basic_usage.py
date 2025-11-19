@@ -6,7 +6,7 @@ os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 import torch
 
-torch.set_default_device("cuda")
+device = torch.device("cuda")
 
 # Input dimensions (typical for large language models)
 vocab_size = 256_000
@@ -22,8 +22,8 @@ print(f"  hidden_size = {hidden_size:,}")
 print(f"  n_hidden_states = {n_hidden_states:,}")
 
 # Create random inputs
-weights = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
-hidden_states = torch.randn(hidden_size, n_hidden_states, dtype=torch.bfloat16)
+weights = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device)
+hidden_states = torch.randn(hidden_size, n_hidden_states, dtype=torch.bfloat16, device=device)
 
 # Sample from categorical distribution using fused Triton kernel
 samples = fused_mm_sample_triton(

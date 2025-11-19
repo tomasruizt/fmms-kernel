@@ -12,7 +12,7 @@ from pydantic_settings import BaseSettings
 
 from fused_mm_sampling.core import get_sampler, sample
 
-torch.set_default_device("cuda")
+device = torch.device("cuda")
 
 
 class Args(BaseSettings, cli_parse_args=True):
@@ -54,8 +54,10 @@ class Case:
     def make_fn_kwargs(self) -> dict:
         """This function can be slow because it allocates tensors."""
         return dict(
-            hidden_states=torch.randn((hidden_size, self.n_hidden_states), dtype=torch.bfloat16),
-            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16),
+            hidden_states=torch.randn(
+                (hidden_size, self.n_hidden_states), dtype=torch.bfloat16, device=device
+            ),
+            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16, device=device),
             num_samples=self.n_samples,
             temperature=1.0,
         )
@@ -125,7 +127,7 @@ if __name__ == "__main__":
     print(f"{args.n_samples=}")
 
     total_runtimes = df.groupby(["name", "total[s]"], as_index=False).size()
-    print(total_runtimes.round(2))
+    print(total_runtimes.sort_values("total[s]").round(2))
 
     time_distribution = df.groupby("name")[["time[ms]"]].describe()
-    print(time_distribution.round(2))
+    print(time_distribution.sort_values(("time[ms]", "min")).round(2))

@@ -8,7 +8,7 @@ import triton
 
 from fused_mm_sampling.core import get_sampler
 
-torch.set_default_device("cuda")
+device = torch.device("cuda")
 
 # Constants from speed_test.py
 BASE_VOCAB_SIZE = 256000
@@ -38,8 +38,12 @@ def create_benchmark(mode: str):
         @triton.testing.perf_report(config)
         def benchmark(n_hidden_states, provider):
             # Prepare inputs with fixed vocab_size, varying batch
-            hidden_states = torch.randn((HIDDEN_SIZE, n_hidden_states), dtype=torch.bfloat16)
-            weights = torch.randn((BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16)
+            hidden_states = torch.randn(
+                (HIDDEN_SIZE, n_hidden_states), dtype=torch.bfloat16, device=device
+            )
+            weights = torch.randn(
+                (BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
+            )
             ms, min_ms, max_ms = _run_benchmark(hidden_states, weights, provider)
             total_n_samples = n_hidden_states * N_SAMPLES
             samples_per_ms = total_n_samples / ms
@@ -65,8 +69,10 @@ def create_benchmark(mode: str):
         @triton.testing.perf_report(config)
         def benchmark(vocab_size, provider):
             # Prepare inputs with fixed batch, varying vocab_size
-            hidden_states = torch.randn((HIDDEN_SIZE, 256), dtype=torch.bfloat16)  # Fixed batch=256
-            weights = torch.randn((vocab_size, HIDDEN_SIZE), dtype=torch.bfloat16)
+            hidden_states = torch.randn(
+                (HIDDEN_SIZE, 256), dtype=torch.bfloat16, device=device
+            )  # Fixed batch=256
+            weights = torch.randn((vocab_size, HIDDEN_SIZE), dtype=torch.bfloat16, device=device)
             return _run_benchmark(hidden_states, weights, provider)
 
     else:

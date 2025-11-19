@@ -4,13 +4,13 @@ import torch
 
 from fused_mm_sampling.core import JLSampler
 
-torch.set_default_device("cuda")
+device = torch.device("cuda")
 
 
 def test_jl_sampling_aproximate_correctness():
     folder = Path(__file__).parent / "qwen3-0.6b"
-    weights = torch.load(folder / "weights.pt")
-    hidden_states = torch.load(folder / "hidden_states.pt")
+    weights = torch.load(folder / "weights.pt", map_location=device)
+    hidden_states = torch.load(folder / "hidden_states.pt", map_location=device)
     expected_logits = weights @ hidden_states
     expected_probs = expected_logits.softmax(dim=0)
 
