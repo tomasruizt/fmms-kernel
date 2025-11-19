@@ -124,10 +124,9 @@ if __name__ == "__main__":
         directory = "profiles/plots/"
         os.makedirs(directory, exist_ok=True)
         df: pd.DataFrame = benchmark.run(
-            print_data=True, show_plots=True, save_path=directory, return_df=True
+            print_data=True,
+            show_plots=True,
+            save_path=directory,
+            return_df=True,
         )
-        csv = f"profiles/triton/{mode}.csv"
-        os.makedirs(os.path.dirname(csv), exist_ok=True)
-        df.to_csv(csv, index=False)
-        print(f"Saved benchmark results to {csv}")
         print()
