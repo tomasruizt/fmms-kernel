@@ -286,8 +286,25 @@ class JLSampler(Sampler):
             raise ValueError("Sampler not prepared. Call .prepare() first.")
         if seed is not None:
             torch.manual_seed(seed)
-        h_p = self.rand_mat.T @ hidden_states  # [k, n_hidden_states]
-        logits_p = self.w_p @ h_p  # [V, n_hidden_states]
+        logits_p = self.compute_logits(hidden_states)
         probs = (logits_p / temperature).softmax(dim=0)  # [V, n_hidden_states]
         samples = torch.multinomial(probs.T, num_samples=num_samples, replacement=True)
         return samples
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,  # [D, n_hidden_states]
+    ) -> torch.Tensor:
+        h_p = self.rand_mat.T @ hidden_states  # [k, n_hidden_states]
+        return self.w_p @ h_p  # [V, n_hidden_states]
+
+    def rrt(self) -> torch.Tensor:
+        """Return R @ Rᵀ, which should be close to the identity matrix."""
+        m = self.rand_mat
+        return m @ m.T
+
+
+def optimal_k(n: int, epsilon: float) -> int:
+    """Source: https://cs.stanford.edu/people/mmahoney/cs369m/Lectures/lecture1.pdf"""
+    k_float = 24 * math.log(n, math.e) / (3 * epsilon**2 - 2 * epsilon**3)
+    return int(math.ceil(k_float))
