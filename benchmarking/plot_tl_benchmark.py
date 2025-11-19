@@ -2,16 +2,11 @@ import os
 
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
+import pandas as pd
 import torch
 import triton
 
-from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import (
-    JLSampler,
-    Sampler,
-    SimpleSampler,
-    sample,
-)
+from fused_mm_sampling.core import get_sampler
 
 torch.set_default_device("cuda")
 
@@ -20,8 +15,6 @@ BASE_VOCAB_SIZE = 256000
 HIDDEN_SIZE = 8192
 N_SAMPLES = 1
 TEMPERATURE = 1.0
-
-sample_compiled = torch.compile(sample)
 
 
 def create_benchmark(mode: str):
@@ -93,14 +86,7 @@ def _run_benchmark(hidden_states, weights, provider):
         temperature=TEMPERATURE,
     )
 
-    # Select the sampler based on provider
-    mapping: dict[str, Sampler] = {
-        "fused-triton": SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0)),
-        "naive-pt": SimpleSampler(sample),
-        "naive-compiled": SimpleSampler(sample_compiled),
-        "jl-compiled": JLSampler(weights, k=100),
-    }
-    sampler = mapping[provider]
+    sampler = get_sampler(provider, weights=weights)
     sampler.prepare()
 
     def fn():
@@ -122,7 +108,6 @@ if __name__ == "__main__":
     for mode in modes:
         print("=" * 80)
         print(f"Benchmark Mode: {mode}")
-        print("=" * 80)
         print("Configuration:")
         if mode == "batch":
             print(f"  vocab_size: {BASE_VOCAB_SIZE} (fixed)")
@@ -138,5 +123,11 @@ if __name__ == "__main__":
         benchmark = create_benchmark(mode)
         directory = "profiles/plots/"
         os.makedirs(directory, exist_ok=True)
-        benchmark.run(print_data=True, show_plots=True, save_path=directory)
+        df: pd.DataFrame = benchmark.run(
+            print_data=True, show_plots=True, save_path=directory, return_df=True
+        )
+        csv = f"profiles/triton/{mode}.csv"
+        os.makedirs(os.path.dirname(csv), exist_ok=True)
+        df.to_csv(csv, index=False)
+        print(f"Saved benchmark results to {csv}")
         print()

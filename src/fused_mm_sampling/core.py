@@ -64,6 +64,7 @@ def cdiv(n: int, div: int) -> int:
 MIN_BLOCK_SIZE_V = 32
 
 
+@torch.compile
 def fused_mm_sample_triton(
     weights: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -258,6 +259,12 @@ class JLSampler(Sampler):
     k: int
     prepared: bool = False
 
+    @classmethod
+    def from_weights(cls, weights: torch.Tensor, epsilon: float = 0.2) -> "JLSampler":
+        k = optimal_k(n=weights.shape[0], epsilon=epsilon)
+        print(f"JLSampler optimal k={k}")
+        return cls(weights, k=k)
+
     def prepare(self) -> "JLSampler":
         D = self.weights.shape[1]  # noqa: N806
         self.rand_mat = torch.randn(
@@ -308,3 +315,17 @@ def optimal_k(n: int, epsilon: float) -> int:
     """Source: https://cs.stanford.edu/people/mmahoney/cs369m/Lectures/lecture1.pdf"""
     k_float = 24 * math.log(n, math.e) / (3 * epsilon**2 - 2 * epsilon**3)
     return int(math.ceil(k_float))
+
+
+def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
+    match provider:
+        case "fused-triton":
+            return SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0))
+        case "naive-pt":
+            return SimpleSampler(sample)
+        case "naive-compiled":
+            return SimpleSampler(torch.compile(sample))
+        case "jl-compiled":
+            return JLSampler.from_weights(weights)
+        case _:
+            raise NotImplementedError()

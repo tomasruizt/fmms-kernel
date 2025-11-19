@@ -10,13 +10,7 @@ import pandas as pd
 import torch
 from pydantic_settings import BaseSettings
 
-from fused_mm_sampling import fused_mm_sample_triton
-from fused_mm_sampling.core import (
-    JLSampler,
-    Sampler,
-    SimpleSampler,
-    sample,
-)
+from fused_mm_sampling.core import get_sampler, sample
 
 torch.set_default_device("cuda")
 
@@ -76,14 +70,10 @@ all_cases = [
 
 
 def benchmark(case: Case) -> pd.DataFrame:
+    print("=" * 80)
+    print(f"Benchmarking {case.name}...")
     kwargs = case.make_fn_kwargs()
-    samplers: dict[str, Sampler] = {
-        "fused-triton": SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0)),
-        "naive-pt": SimpleSampler(sample),
-        "naive-compiled": SimpleSampler(sample_compiled),
-        "jl-compiled": JLSampler(kwargs["weights"], k=100),
-    }
-    sampler = samplers[case.name]
+    sampler = get_sampler(case.name, weights=kwargs["weights"])
     sampler.prepare()
 
     def fn():
