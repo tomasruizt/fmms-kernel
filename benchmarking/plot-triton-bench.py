@@ -42,14 +42,13 @@ def plot_relative_performance(bdf_rel_long: pd.DataFrame) -> None:
     sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.3), ncol=2)
     ax.set_xlabel("Inference batch size")
     ax.set_ylabel("Relative Performance")
-    ax.set_xticks(ax.get_xticks())
-    ax.set_xticklabels([int(x) for x in ax.get_xticks()])
+    ax.set_xticks(ax.get_xticks(), labels=bdf_rel_long["n_hidden_states"].unique().astype(int))
     ax.figure.tight_layout()
     return ax
 
 
 if __name__ == "__main__":
-    folder = Path("profiles/triton-bench/")
+    folder = Path(__file__).parent / "profiles/triton-bench/"
     tgt_folder = folder / "custom-plots"
     bdf = pd.read_csv(folder / "fused-mm-sample-batch-scaling.csv")
     bdf_long = bdf.melt(id_vars=["n_hidden_states"], var_name="provider", value_name="samples/ms")
