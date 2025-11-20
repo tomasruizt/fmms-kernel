@@ -367,20 +367,35 @@ def flashinfer_top_k_top_p_sampling_from_logits(
     top_p: float,
     top_k: int,
 ) -> torch.Tensor:
-    device = weights.device
     batch_size = hidden_states.shape[1]
-    logits = weights @ hidden_states  # [V, n_hidden_states]
-    logits = logits / temperature
-    indices = torch.repeat_interleave(
-        torch.arange(batch_size, device=device, dtype=torch.int32), num_samples
+    logits, indices = flashinfer_create_logits_and_indices(
+        weights, hidden_states, num_samples, temperature
     )
     result = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-        logits=logits.T.contiguous(),
+        logits=logits,
         top_k=top_k,
         top_p=top_p,
         indices=indices,
     )
     return result.reshape(batch_size, num_samples)
+
+
+@torch.compile(fullgraph=True)
+def flashinfer_create_logits_and_indices(
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [D, n_hidden_states]
+    num_samples: int,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    device = weights.device
+    batch_size = hidden_states.shape[1]
+    logits = weights @ hidden_states  # [V, n_hidden_states]
+    logits = logits / temperature
+    logits = logits.T.contiguous()
+    indices = torch.repeat_interleave(
+        torch.arange(batch_size, device=device, dtype=torch.int32), num_samples
+    )
+    return logits, indices
 
 
 def flashinfer_sampling_from_logits(
@@ -389,15 +404,9 @@ def flashinfer_sampling_from_logits(
     num_samples: int,
     temperature: float,
 ) -> torch.Tensor:
-    device = weights.device
     batch_size = hidden_states.shape[1]
-    logits = weights @ hidden_states  # [V, n_hidden_states]
-    logits = logits / temperature
-    indices = torch.repeat_interleave(
-        torch.arange(batch_size, device=device, dtype=torch.int32), num_samples
+    logits, indices = flashinfer_create_logits_and_indices(
+        weights, hidden_states, num_samples, temperature
     )
-    result = flashinfer.sampling.sampling_from_logits(
-        logits=logits.T.contiguous(),
-        indices=indices,
-    )
+    result = flashinfer.sampling.sampling_from_logits(logits=logits, indices=indices)
     return result.reshape(batch_size, num_samples)
