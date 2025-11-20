@@ -2,7 +2,6 @@ import os
 
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
-import pandas as pd
 import torch
 import triton
 
@@ -151,12 +150,7 @@ if __name__ == "__main__":
         print()
 
         benchmark = create_benchmark(mode)
-        directory = "profiles/plots/"
+        directory = "profiles/triton-bench/"
         os.makedirs(directory, exist_ok=True)
-        df: pd.DataFrame = benchmark.run(
-            print_data=True,
-            show_plots=True,
-            save_path=directory,
-            return_df=True,
-        )
+        benchmark.run(print_data=True, save_path=directory)
         print()
