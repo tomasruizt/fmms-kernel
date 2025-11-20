@@ -67,3 +67,9 @@ ncu-export-naive-compiled:
 
 ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled
 	@echo "NCU reports exported to profiles/ncu-txt/"
+
+triton-benchmark:
+	@if [ -d profiles/triton-bench/ ]; then trash-put profiles/triton-bench/; fi
+	mkdir -p profiles/triton-bench
+	python triton_benchmark.py > profiles/triton-bench/logs.txt
+	jupyter nbconvert --execute --to notebook --inplace plot-triton-bench.ipynb

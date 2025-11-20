@@ -7,6 +7,10 @@ import triton
 
 from fused_mm_sampling.core import get_sampler
 
+# prevent torch._dynamo.exc.FailOnRecompileLimitHit: recompile_limit reached with fullgraph=True
+assert torch._dynamo.config.cache_size_limit == 8
+torch._dynamo.config.cache_size_limit = 1_000
+
 device = torch.device("cuda")
 
 # Constants from speed_test.py
