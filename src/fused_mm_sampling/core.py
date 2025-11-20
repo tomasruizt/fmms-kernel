@@ -103,7 +103,7 @@ def fused_mm_sample_triton(
         )
 
     fused_mm_sample_triton_kernel[grid](
-        weights_ptr=weights,
+        weights_ptr=weights.contiguous(),
         hidden_states_ptr=hidden_states.contiguous(),
         max_out_ptr=maxs,
         max_out_idx_ptr=maxs_idx,
@@ -121,38 +121,25 @@ def fused_mm_sample_triton(
     return samples.squeeze(0)  # [n_hidden_states, num_samples]
 
 
-def base_config(block_size_nsamples: int = 1, block_size_h: int = 32):
-    return triton.Config(
-        {
-            "BLOCK_SIZE_V": MIN_BLOCK_SIZE_V,
-            "BLOCK_SIZE_D": 32,
-            "BLOCK_SIZE_H": block_size_h,
-            "BLOCK_SIZE_NSAMPLES": block_size_nsamples,
-            "GROUP_SIZE_V": 4,
-        },
-        maxnreg=255,
-    )
-
-
-def configs() -> list[triton.Config]:
-    simple = base_config()
-    many_n_hidden_states64 = base_config(block_size_h=64)
-    many_n_hidden_states128 = base_config(block_size_h=128)
-    many_n_hidden_states256 = base_config(block_size_h=256)
-    many_samples = base_config(block_size_nsamples=16)
-    return [
-        simple,
-        many_samples,
-        many_n_hidden_states64,
-        many_n_hidden_states128,
-        many_n_hidden_states256,
-    ]
-
-
 @triton.autotune(
-    configs=configs(),
+    configs=[
+        triton.Config(
+            {
+                "BLOCK_SIZE_V": MIN_BLOCK_SIZE_V,
+                "BLOCK_SIZE_D": 32,
+                "GROUP_SIZE_V": 4,
+            },
+            maxnreg=255,
+        )
+    ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
     cache_results=True,
+)
+@triton.heuristics(
+    values={
+        "BLOCK_SIZE_H": lambda args: min(256, triton.next_power_of_2(args["n_hidden_states"])),
+        "BLOCK_SIZE_NSAMPLES": lambda args: min(32, triton.next_power_of_2(args["num_samples"])),
+    }
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(

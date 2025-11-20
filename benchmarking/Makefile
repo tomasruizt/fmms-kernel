@@ -21,6 +21,7 @@ ncu-profile-fused-triton:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
+		--kernel-name fused_mm_sample_triton_kernel \
 		--source-folders $$(pwd)/../src/fused_mm_sampling \
 		--import-source yes \
 		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton --n_hidden_states 1
