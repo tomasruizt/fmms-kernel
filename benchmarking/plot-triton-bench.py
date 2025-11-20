@@ -31,6 +31,23 @@ def plot_vocab_scaling(vdf_long: pd.DataFrame) -> None:
     return ax
 
 
+def plot_relative_performance(bdf_rel_long: pd.DataFrame) -> None:
+    ax = sns.barplot(
+        bdf_rel_long.query("provider == @ref_method or provider == 'Fused Triton'"),
+        x="n_hidden_states",
+        y="samples/ms",
+        hue="provider",
+    )
+    ax.grid(alpha=0.5, axis="y")
+    sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.3), ncol=2)
+    ax.set_xlabel("Inference batch size")
+    ax.set_ylabel("Relative Performance")
+    ax.set_xticks(ax.get_xticks())
+    ax.set_xticklabels([int(x) for x in ax.get_xticks()])
+    ax.figure.tight_layout()
+    return ax
+
+
 if __name__ == "__main__":
     folder = Path("profiles/triton-bench/")
     tgt_folder = folder / "custom-plots"
@@ -48,3 +65,15 @@ if __name__ == "__main__":
     vdf_long = vdf_long.query("provider != 'JL Compiled'")
     ax = plot_vocab_scaling(vdf_long)
     ax.figure.savefig(tgt_folder / "vocab-scaling.png", dpi=300)
+    plt.close(ax.figure)
+
+    ref_method = "flashinfer:sampling_from_logits"
+    methods = [c for c in bdf.columns if c != ref_method and c != "n_hidden_states"]
+    bdf_rel = bdf.copy()
+    bdf_rel[[*methods, ref_method]] = bdf[[*methods, ref_method]].div(bdf[ref_method], axis=0)
+    bdf_rel_long = bdf_rel.melt(
+        id_vars=["n_hidden_states"], var_name="provider", value_name="samples/ms"
+    )
+    ax = plot_relative_performance(bdf_rel_long)
+    ax.figure.savefig(tgt_folder / "relative-performance.png", dpi=300)
+    plt.close(ax.figure)
