@@ -90,15 +90,17 @@ def benchmark(case: Case) -> pd.DataFrame:
 
     print("Timing...")
     times_ms = []
-    for _ in range(case.n_runs_benchmark):
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        timeit.timeit(fn, number=1)
-        end_event.record()
-        end_event.synchronize()
-        ms_elapsed = start_event.elapsed_time(end_event)
-        times_ms.append(ms_elapsed)
+    with torch.cuda.nvtx.range("kernel"):
+        for _ in range(case.n_runs_benchmark):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            timeit.timeit(fn, number=1)
+            end_event.record()
+            end_event.synchronize()
+            ms_elapsed = start_event.elapsed_time(end_event)
+            times_ms.append(ms_elapsed)
+        torch.cuda.synchronize()
 
     results = {
         "name": case.name,
