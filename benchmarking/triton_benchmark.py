@@ -27,7 +27,7 @@ def create_benchmark(mode: str):
         # Scale over batch size (n_hidden_states)
         config = triton.testing.Benchmark(
             x_names=["n_hidden_states"],
-            x_vals=[1, 4, 16, 32, 64, 128, 256, 512, 1024],
+            x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
             x_log=True,
             line_arg="provider",
             line_vals=[

@@ -72,4 +72,4 @@ triton-benchmark:
 	@if [ -d profiles/triton-bench/ ]; then trash-put profiles/triton-bench/; fi
 	mkdir -p profiles/triton-bench
 	python triton_benchmark.py > profiles/triton-bench/logs.txt
-	jupyter nbconvert --execute --to notebook --inplace plot-triton-bench.ipynb
+	python plot-triton-bench.py
