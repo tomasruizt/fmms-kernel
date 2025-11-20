@@ -36,9 +36,9 @@ def main():
         outputs = model.model.forward(**model_inputs)
 
     os.makedirs("qwen3-0.6b", exist_ok=True)
-    hidden_states = outputs.last_hidden_state[:, -1, :].T  # [D, n_hidden_states]
+    hidden_states = outputs.last_hidden_state[:, -1, :]  # [n_hidden_states, D]
     torch.save(hidden_states, "qwen3-0.6b/hidden_states.pt")
-    weights = model.lm_head.weight.data  # [V, D]
+    weights = model.lm_head.weight.data.T  # [D, V]
     torch.save(weights, "qwen3-0.6b/weights.pt")
 
 

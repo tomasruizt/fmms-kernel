@@ -55,9 +55,9 @@ class Case:
         """This function can be slow because it allocates tensors."""
         return dict(
             hidden_states=torch.randn(
-                (hidden_size, self.n_hidden_states), dtype=torch.bfloat16, device=device
+                (self.n_hidden_states, hidden_size), dtype=torch.bfloat16, device=device
             ),
-            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16, device=device),
+            weights=torch.randn((hidden_size, vocab_size), dtype=torch.bfloat16, device=device),
             num_samples=self.n_samples,
             temperature=1.0,
         )

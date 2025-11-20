@@ -13,8 +13,8 @@ n_hidden_states = 2  # num vectors in the hidden states
 print("Started memory profiling")
 torch.cuda.memory._record_memory_history()
 
-hidden_states = torch.randn((hidden_size, n_hidden_states), device=device)
-weights = torch.randn((vocab_size, hidden_size), device=device)
+hidden_states = torch.randn((n_hidden_states, hidden_size), device=device)
+weights = torch.randn((hidden_size, vocab_size), device=device)
 samples = sample(weights, hidden_states, num_samples=1, temperature=1.0)
 print(samples.shape)
 path = Path(__file__).parent / "profiles" / "memory" / "mem-snapshot.pickle"

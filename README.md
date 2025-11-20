@@ -39,8 +39,8 @@ The basic usage pattern:
 from fused_mm_sampling import fused_mm_sample_triton
 
 samples = fused_mm_sample_triton(
-    weights=weights,        # [vocab_size, hidden_size]
-    hidden_states=hidden_states,  # [hidden_size, n_hidden_states]
+    weights=weights,        # [hidden_size, vocab_size]
+    hidden_states=hidden_states,  # [n_hidden_states, hidden_size]
     num_samples=1,
     temperature=1.0,
     seed=42  # Optional: for reproducibility
@@ -50,8 +50,8 @@ samples = fused_mm_sample_triton(
 
 ### Parameters
 
-- **`weights`** (Tensor): Weight matrix of shape `[vocab_size, hidden_size]`
-- **`hidden_states`** (Tensor): Hidden states of shape `[hidden_size, n_hidden_states]`
+- **`weights`** (Tensor): Weight matrix of shape `[hidden_size, vocab_size]`
+- **`hidden_states`** (Tensor): Hidden states of shape `[n_hidden_states, hidden_size]`
 - **`num_samples`** (int): Number of samples to draw per sequence position
 - **`temperature`** (float): Temperature for sampling (higher = more random)
 - **`seed`** (int, optional): Random seed for reproducibility
@@ -64,7 +64,7 @@ samples = fused_mm_sample_triton(
 
 The package implements the Gumbel-max trick for categorical sampling:
 
-1. **Matrix Multiplication**: Compute logits = weights @ hidden_states
+1. **Matrix Multiplication**: Compute logits = hidden_states @ weights
 2. **Temperature Scaling**: Scale logits by temperature
 3. **Gumbel Noise**: Add Gumbel noise to scaled logits
 4. **Argmax**: Take argmax to get samples

@@ -22,8 +22,8 @@ print(f"  hidden_size = {hidden_size:,}")
 print(f"  n_hidden_states = {n_hidden_states:,}")
 
 # Create random inputs
-weights = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device)
-hidden_states = torch.randn(hidden_size, n_hidden_states, dtype=torch.bfloat16, device=device)
+weights = torch.randn(hidden_size, vocab_size, dtype=torch.bfloat16, device=device)
+hidden_states = torch.randn(n_hidden_states, hidden_size, dtype=torch.bfloat16, device=device)
 
 # Sample from categorical distribution using fused Triton kernel
 samples = fused_mm_sample_triton(

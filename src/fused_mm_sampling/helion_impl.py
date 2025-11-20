@@ -44,6 +44,8 @@ def fused_sample_helion(weights: torch.Tensor, hidden_states: torch.Tensor) -> t
 
 
 if __name__ == "__main__":
+    # TODO: This is still in the old format. Not yet migrated to
+    # logits with shape [n_hidden_states, V].
     vocab_size = 100  # V
     hidden_size = 10  # D
     logits1 = torch.arange(-vocab_size / 2, vocab_size / 2)[None, :]  # [1, V]

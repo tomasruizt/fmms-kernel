@@ -54,10 +54,10 @@ def create_benchmark(mode: str):
         def benchmark(n_hidden_states, provider):
             # Prepare inputs with fixed vocab_size, varying batch
             hidden_states = torch.randn(
-                (HIDDEN_SIZE, n_hidden_states), dtype=torch.bfloat16, device=device
+                (n_hidden_states, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
             )
             weights = torch.randn(
-                (BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
+                (HIDDEN_SIZE, BASE_VOCAB_SIZE), dtype=torch.bfloat16, device=device
             )
             ms, min_ms, max_ms = _run_benchmark(hidden_states, weights, provider)
             total_n_samples = n_hidden_states * N_SAMPLES
@@ -97,9 +97,9 @@ def create_benchmark(mode: str):
         def benchmark(vocab_size, provider):
             # Prepare inputs with fixed batch, varying vocab_size
             hidden_states = torch.randn(
-                (HIDDEN_SIZE, 256), dtype=torch.bfloat16, device=device
+                (256, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
             )  # Fixed batch=256
-            weights = torch.randn((vocab_size, HIDDEN_SIZE), dtype=torch.bfloat16, device=device)
+            weights = torch.randn((HIDDEN_SIZE, vocab_size), dtype=torch.bfloat16, device=device)
             return _run_benchmark(hidden_states, weights, provider)
 
     else:
