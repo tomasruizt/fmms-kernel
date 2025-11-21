@@ -124,28 +124,60 @@ def fused_mm_sample_triton(
 def clip(low, high, x):
     return min(max(x, low), high)
 
+
+def is_config_valid(bsz_v, bsz_d, bsz_h):
+    # Derive limit from hardware constraints:
+    # - H100/A100 shared memory: 232448 (from Triton logs)
+    max_bytes = 232448
+
+    # Memory usage in kernel:
+    # - logits_blk: bsz_v * bsz_h * 4 bytes (float32, persists)
+    # - w_blk: bsz_v * bsz_d * 2 bytes (bfloat16, during matmul)
+    # - hidden_states_blk: bsz_h * bsz_d * 2 bytes (bfloat16, during matmul)
+    # - noise: bsz_v * bsz_h * 4 bytes (float32, BLOCK_SIZE_NSAMPLES=1)
+    # - gumbel_noise: bsz_v * bsz_h * 4 bytes (float32, BLOCK_SIZE_NSAMPLES=1)
+
+    # Peak memory during sampling phase (BLOCK_SIZE_NSAMPLES=1):
+    # logits_blk + gumbel_noise = bsz_v * bsz_h * (4 + 4) bytes
+    # = bsz_v * bsz_h * 8 bytes per element
+    bytes_per_elem = 8
+    max_elements = max_bytes / bytes_per_elem  # ~16,384 elements
+
+    if bsz_v * bsz_h > max_elements:
+        return False
+
+    # Also check matmul phase memory (w_blk + hidden_states_blk)
+    matmul_bytes = bsz_v * bsz_d * 2 + bsz_h * bsz_d * 2
+    if matmul_bytes > max_bytes:
+        return False
+
+    return True
+
+
 @triton.autotune(
     configs=[
         triton.Config(
             {
                 "BLOCK_SIZE_V": bsz_v,
                 "BLOCK_SIZE_D": bsz_d,
+                "BLOCK_SIZE_H": bsz_h,
                 "GROUP_SIZE_V": 4,
+                "BLOCK_SIZE_NSAMPLES": 1,
             },
-            maxnreg=255,
+            num_warps=num_warps,
+            num_stages=num_stages,
+            maxnreg=maxnreg,
         )
-        for bsz_v in [MIN_BLOCK_SIZE_V, 4 * MIN_BLOCK_SIZE_V]
-        for bsz_d in [32]
+        for bsz_v in [MIN_BLOCK_SIZE_V, 4 * MIN_BLOCK_SIZE_V, 8 * MIN_BLOCK_SIZE_V]
+        for bsz_d in [32, 64]
+        for bsz_h in [16, 64, 128, 256]
+        for num_warps in [8]  # Default 4
+        for maxnreg in [128]  # Previously 255
+        for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
+        if is_config_valid(bsz_v, bsz_d, bsz_h)
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
     cache_results=True,
-)
-@triton.heuristics(
-    values={
-        # Tile size at least 16 for efficient matmul on H100+
-        "BLOCK_SIZE_H": lambda args: clip(low=16, high=256, x=triton.next_power_of_2(args["n_hidden_states"])),
-        "BLOCK_SIZE_NSAMPLES": lambda args: min(32, triton.next_power_of_2(args["num_samples"])),
-    }
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(
@@ -224,11 +256,15 @@ def fused_mm_sample_triton_kernel(
         )
         # Note: Each tile (v, h) and batch of samples needs a different seed,
         # otherwise they all create the same noise, leading to sampling artifacts.
-        unif_noise = tl.rand(
-            seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
-            noise_offsets,
+        # Compute gumbel noise directly to reduce register pressure
+        gumbel_noise = -tl.log(
+            -tl.log(
+                tl.rand(
+                    seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
+                    noise_offsets,
+                )
+            )
         )
-        gumbel_noise = -tl.log(-tl.log(unif_noise))
 
         gumbel_max, gumbel_max_idx_local = tl.max(
             logits_blk + gumbel_noise, axis=1, return_indices=True
