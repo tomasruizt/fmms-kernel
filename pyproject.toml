@@ -34,8 +34,11 @@ dev = [
     "helion>=0.1.0",  # Only for benchmarking
     "seaborn",
     "pytest",
-    "accelerate",
     "flashinfer-python",
+]
+gen_inputs = [
+    "transformers",
+    "accelerate",
 ]
 
 [project.urls]
