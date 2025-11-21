@@ -121,6 +121,9 @@ def fused_mm_sample_triton(
     return samples.squeeze(0)  # [n_hidden_states, num_samples]
 
 
+def clip(low, high, x):
+    return min(max(x, low), high)
+
 @triton.autotune(
     configs=[
         triton.Config(
@@ -139,7 +142,8 @@ def fused_mm_sample_triton(
 )
 @triton.heuristics(
     values={
-        "BLOCK_SIZE_H": lambda args: min(256, triton.next_power_of_2(args["n_hidden_states"])),
+        # Tile size at least 16 for efficient matmul on H100+
+        "BLOCK_SIZE_H": lambda args: clip(low=16, high=256, x=triton.next_power_of_2(args["n_hidden_states"])),
         "BLOCK_SIZE_NSAMPLES": lambda args: min(32, triton.next_power_of_2(args["num_samples"])),
     }
 )
