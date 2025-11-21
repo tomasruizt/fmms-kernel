@@ -10,6 +10,9 @@ download-html-conversion-tool:
 speed-test:
 	python speed_test.py
 
+NCU=$(shell which ncu)
+PYTHON=$(shell which python)
+
 # NCU profiling targets:
 # --import-source yes: Embeds source code into the .ncu-rep file, allowing it to be
 #   viewed on a different machine without path remapping. The source is embedded
@@ -18,13 +21,13 @@ speed-test:
 #   For Triton kernels, this helps NCU find the Python source files.
 ncu-profile-fused-triton:
 	mkdir -p profiles/ncu
-	ncu --set detailed \
+	sudo $(NCU) --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
 		--source-folders $$(pwd)/../src/fused_mm_sampling \
 		--import-source yes \
-		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton --n_hidden_states 256
+		-fo profiles/ncu/fused-triton $(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states 256
 
 
 ncu-profile-flashinfer:
@@ -63,11 +66,11 @@ nsight-profile-naive-pt:
 
 ncu-export-fused-triton:
 	mkdir -p profiles/ncu-txt
-	ncu --set full \
+	sudo $(NCU) --set full \
 		--nvtx \
 		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
-		python ./speed_test.py --name fused-triton --n_hidden_states 256 > profiles/ncu-txt/fused-triton.txt
+		$(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states 256 > profiles/ncu-txt/fused-triton.txt
 
 ncu-export-naive-compiled:
 	mkdir -p profiles/ncu-txt
