@@ -24,7 +24,7 @@ ncu-profile-fused-triton:
 		--kernel-name fused_mm_sample_triton_kernel \
 		--source-folders $$(pwd)/../src/fused_mm_sampling \
 		--import-source yes \
-		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton --n_hidden_states 1
+		-fo profiles/ncu/fused-triton python ./speed_test.py --name fused-triton --n_hidden_states 256
 
 
 ncu-profile-flashinfer:
@@ -64,9 +64,10 @@ nsight-profile-naive-pt:
 ncu-export-fused-triton:
 	mkdir -p profiles/ncu-txt
 	ncu --set full \
-		--launch-skip 10 \
+		--nvtx \
+		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
-		python ./speed_test.py --name fused-triton --n_hidden_states 1 > profiles/ncu-txt/fused-triton.txt
+		python ./speed_test.py --name fused-triton --n_hidden_states 256 > profiles/ncu-txt/fused-triton.txt
 
 ncu-export-naive-compiled:
 	mkdir -p profiles/ncu-txt

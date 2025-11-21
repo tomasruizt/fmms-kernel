@@ -28,6 +28,7 @@ def create_benchmark(mode: str):
         config = triton.testing.Benchmark(
             x_names=["n_hidden_states"],
             x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+            # x_vals=[1, 8, 64, 128, 256, 512, 1024],
             x_log=True,
             line_arg="provider",
             line_vals=[
@@ -71,6 +72,7 @@ def create_benchmark(mode: str):
         config = triton.testing.Benchmark(
             x_names=["vocab_size"],
             x_vals=[250_000, 200_000, 175_000, 150_000, 125_000, 100_000, 80_000, 64_000],
+            # x_vals=[250_000, 175_000, 125_000, 64_000],
             x_log=True,
             line_arg="provider",
             line_vals=[
