@@ -29,7 +29,7 @@ ncu-profile-fused-triton:
 		--kernel-name fused_mm_sample_triton_kernel \
 		--source-folders $$(pwd)/../src/fused_mm_sampling \
 		--import-source yes \
-		-fo profiles/ncu/fused-triton $(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES)
+		-fo profiles/ncu/fused-triton $(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 
 ncu-profile-flashinfer:
@@ -37,7 +37,7 @@ ncu-profile-flashinfer:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		-fo profiles/ncu/flashinfer python ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES)
+		-fo profiles/ncu/flashinfer python ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 
 ncu-profile-naive-compiled:
@@ -45,7 +45,7 @@ ncu-profile-naive-compiled:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES)
+		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 
 nsight-profile-fused-triton:
@@ -78,23 +78,31 @@ ncu-export-fused-triton:
 		--nvtx \
 		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
-		$(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/fused-triton.txt
+		$(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/fused-triton.txt
+
+ncu-export-naive-tl-matmul:
+	mkdir -p profiles/ncu-txt
+	$(NCU) --set full \
+		--nvtx \
+		--nvtx-include "kernel/" \
+		--kernel-name matmul_kernel \
+		$(PYTHON) ./speed_test.py --name naive-tl-matmul --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/naive-tl-matmul.txt
 
 ncu-export-naive-compiled:
 	mkdir -p profiles/ncu-txt
 	$(NCU) --set full \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		$(PYTHON) ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/naive-compiled.txt
+		$(PYTHON) ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/naive-compiled.txt
 
 ncu-export-flashinfer:
 	mkdir -p profiles/ncu-txt
 	$(NCU) --set full \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		$(PYTHON) ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/flashinfer.txt
+		$(PYTHON) ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/flashinfer.txt
 
-ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-flashinfer
+ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-flashinfer ncu-export-naive-tl-matmul
 	@echo "NCU reports exported to profiles/ncu-txt/"
 
 triton-benchmark:

@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from fused_mm_sampling.tl_matmul import matmul
+
 
 def sample(
     weights: torch.Tensor,  # [D, V]
@@ -18,15 +20,22 @@ def sample(
     temperature: float,
     return_probs: bool = False,
     seed: int = None,
+    tl_matmul: bool = False,
 ):
     if seed is not None:
         torch.manual_seed(seed)
-    logits = hidden_states @ weights  # [n_hidden_states, V]
+    if tl_matmul:
+        logits = matmul(hidden_states, weights)  # [n_hidden_states, V]
+    else:
+        logits = hidden_states @ weights  # [n_hidden_states, V]
     probs = (logits / temperature).softmax(dim=1)
     samples = torch.multinomial(probs, num_samples=num_samples, replacement=True)
     if return_probs:
         return samples, probs
     return samples
+
+
+sample_compiled = torch.compile(sample)
 
 
 def incremental_sample_pt(
@@ -207,7 +216,9 @@ def fused_mm_sample_triton_kernel(
     # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
     pid_v = tl.program_id(axis=0)
     pid_h = tl.program_id(axis=1)
-    pid_v, pid_h = tl.swizzle2d(pid_v, pid_h, vocab_size, n_hidden_states, GROUP_SIZE_V)
+    num_pid_v = tl.cdiv(vocab_size, BLOCK_SIZE_V)
+    num_pid_h = tl.cdiv(n_hidden_states, BLOCK_SIZE_H)
+    pid_v, pid_h = tl.swizzle2d(pid_v, pid_h, num_pid_v, num_pid_h, GROUP_SIZE_V)
     v_start = pid_v * BLOCK_SIZE_V
     h_start = pid_h * BLOCK_SIZE_H
 
@@ -390,7 +401,9 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
         case "naive-pt":
             return SimpleSampler(sample)
         case "naive-compiled":
-            return SimpleSampler(torch.compile(sample))
+            return SimpleSampler(sample_compiled)
+        case "naive-tl-matmul":
+            return SimpleSampler(lambda **kwargs: sample(**kwargs, tl_matmul=True))
         case "jl-compiled":
             return JLSampler.from_weights(weights)
         case "flashinfer:top_k_top_p_sampling_from_logits":
