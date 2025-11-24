@@ -28,7 +28,7 @@ def create_benchmark(mode: str):
         config = triton.testing.Benchmark(
             x_names=["n_hidden_states"],
             x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
-            # x_vals=[1, 8, 64, 128, 256, 512, 1024],
+            # x_vals=[1, 8, 16, 64, 128],
             x_log=True,
             line_arg="provider",
             line_vals=[
@@ -46,7 +46,7 @@ def create_benchmark(mode: str):
                 "flashinfer:sampling_from_logits",
             ],
             styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-"), ("purple", "-")],
-            ylabel="Samples/ms",
+            ylabel="Time (ms)",
             plot_name="fused-mm-sample-batch-scaling",
             args={},
         )
@@ -60,12 +60,7 @@ def create_benchmark(mode: str):
             weights = torch.randn(
                 (HIDDEN_SIZE, BASE_VOCAB_SIZE), dtype=torch.bfloat16, device=device
             )
-            ms, min_ms, max_ms = _run_benchmark(hidden_states, weights, provider)
-            total_n_samples = n_hidden_states * N_SAMPLES
-            samples_per_ms = total_n_samples / ms
-            max_samples_per_ms = total_n_samples / min_ms
-            min_samples_per_ms = total_n_samples / max_ms
-            return samples_per_ms, min_samples_per_ms, max_samples_per_ms
+            return _run_benchmark(hidden_states, weights, provider)
 
     elif mode == "vocab":
         # Scale over vocabulary size
@@ -110,7 +105,7 @@ def create_benchmark(mode: str):
     return benchmark
 
 
-def _run_benchmark(hidden_states, weights, provider):
+def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider: str) -> float:
     """Common benchmark logic for all modes."""
     print(f"Running benchmark for provider: {provider}")
 
@@ -127,18 +122,12 @@ def _run_benchmark(hidden_states, weights, provider):
     def fn():
         return sampler.sample(**kwargs)
 
-    for _ in range(10):
-        fn()
-    torch.cuda.synchronize()
-
     quantiles = [0.1, 0.5, 0.9]
-    ms, min_ms, max_ms = triton.testing.do_bench(fn, quantiles=quantiles)
-
-    return ms, min_ms, max_ms
+    return triton.testing.do_bench(fn, quantiles=quantiles)
 
 
 if __name__ == "__main__":
-    modes = ["batch", "vocab"]
+    modes = ["batch"]  # , "vocab"]
 
     for mode in modes:
         print("=" * 80)
