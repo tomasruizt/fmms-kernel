@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 import torch
+import triton
 from pydantic_settings import BaseSettings
 
 from fused_mm_sampling.core import get_sampler, sample
@@ -17,22 +18,27 @@ device = torch.device("cuda")
 
 class Args(BaseSettings, cli_parse_args=True):
     name: str | None = None
-    n_runs_warmup: int = 10
-    n_runs_benchmark: int = 1
+    n_runs_warmup: int = 25
+    n_runs_benchmark: int = 100
 
     n_hidden_states: int = 256
     n_samples: int = 1
 
-    def as_case(self) -> "Case":
+    def as_case(self, name: str | None = None) -> "Case":
+        if name is None:
+            name = self.name
         assert self.n_runs_warmup is not None
         assert self.n_runs_benchmark is not None
         return Case(
-            name=self.name,
+            name=name,
             n_runs_benchmark=self.n_runs_benchmark,
             n_runs_warmup=self.n_runs_warmup,
             n_hidden_states=self.n_hidden_states,
             n_samples=self.n_samples,
         )
+
+    def all_cases(self) -> list["Case"]:
+        return [self.as_case(name=provider) for provider in all_providers]
 
 
 vocab_size = 256000
@@ -45,11 +51,11 @@ sample_compiled = torch.compile(sample)
 @dataclass
 class Case:
     name: str
-    n_runs_benchmark: int = 10
-    n_runs_warmup: int = 10
+    n_runs_benchmark: int
+    n_runs_warmup: int
 
-    n_hidden_states: int = 256
-    n_samples: int = 1
+    n_hidden_states: int
+    n_samples: int
 
     def make_fn_kwargs(self) -> dict:
         """This function can be slow because it allocates tensors."""
@@ -63,17 +69,18 @@ class Case:
         )
 
 
-all_cases = [
-    Case(name="fused-triton"),
-    # Case(name="naive-pt"),
-    Case(name="naive-compiled"),
-    Case(name="jl-compiled"),
-    Case(name="flashinfer:top_k_top_p_sampling_from_logits"),
-    Case(name="flashinfer:sampling_from_logits"),
+all_providers = [
+    "fused-triton",
+    "naive-compiled",
+    "jl-compiled",
+    "flashinfer:top_k_top_p_sampling_from_logits",
+    "flashinfer:sampling_from_logits",
 ]
 
 
 def benchmark(case: Case) -> pd.DataFrame:
+    """Inspired by triton.testing.do_bench"""
+
     print("=" * 80)
     print(f"Benchmarking {case.name}...")
     kwargs = case.make_fn_kwargs()
@@ -83,24 +90,32 @@ def benchmark(case: Case) -> pd.DataFrame:
     def fn():
         return sampler.sample(**kwargs)
 
+    di = triton.runtime.driver.active.get_device_interface()
+
+    # Compile, etc.
+    fn()
+    di.synchronize()
+
+    cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()
+    start_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
+    end_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
+
     print("Warming up...")
     for _ in range(case.n_runs_warmup):
+        triton.runtime.driver.active.clear_cache(cache)
         fn()
-    torch.cuda.synchronize()
 
     print("Timing...")
-    times_ms = []
     with torch.cuda.nvtx.range("kernel"):
-        for _ in range(case.n_runs_benchmark):
-            start_event = torch.cuda.Event(enable_timing=True)
-            end_event = torch.cuda.Event(enable_timing=True)
+        for _, start_event, end_event in zip(
+            range(case.n_runs_benchmark), start_events, end_events
+        ):
+            triton.runtime.driver.active.clear_cache(cache)
             start_event.record()
             timeit.timeit(fn, number=1)
             end_event.record()
-            end_event.synchronize()
-            ms_elapsed = start_event.elapsed_time(end_event)
-            times_ms.append(ms_elapsed)
-        torch.cuda.synchronize()
+        di.synchronize()
+        times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
     results = {
         "name": case.name,
@@ -123,7 +138,7 @@ if __name__ == "__main__":
     if args.name is not None:
         cases = [args.as_case()]
     else:
-        cases = all_cases
+        cases = args.all_cases()
     df = benchmark_all(cases)
     print(f"{vocab_size=}")
     print(f"{hidden_size=}")

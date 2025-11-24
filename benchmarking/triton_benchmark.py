@@ -4,6 +4,7 @@ os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
 
 import torch
 import triton
+from pydantic_settings import BaseSettings
 
 from fused_mm_sampling.core import get_sampler
 
@@ -13,39 +14,54 @@ torch._dynamo.config.cache_size_limit = 1_000
 
 device = torch.device("cuda")
 
-# Constants from speed_test.py
 BASE_VOCAB_SIZE = 256000
 HIDDEN_SIZE = 8192
 N_SAMPLES = 1
 TEMPERATURE = 1.0
 
 
-def create_benchmark(mode: str):
+class Args(BaseSettings, cli_parse_args=True):
+    name: str | None = None
+    n_hidden_states: int | None = None
+
+
+provider_names = {
+    "fused-triton": "Fused Triton",
+    "naive-compiled": "Naive Compiled",
+    "jl-compiled": "JL Compiled",
+    "flashinfer:top_k_top_p_sampling_from_logits": "flashinfer:top_k_top_p_sampling_from_logits",
+    "flashinfer:sampling_from_logits": "flashinfer:sampling_from_logits",
+}
+
+all_styles = [("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-"), ("purple", "-")]
+
+
+def create_benchmark(args: Args, mode: str):
     """Create a benchmark function for the specified mode."""
+
+    if args.n_hidden_states is not None:
+        x_vals = [args.n_hidden_states]
+    else:
+        x_vals = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+    if args.name is not None:
+        providers = [args.name]
+    else:
+        providers = list(provider_names.keys())
+
+    lines_names = [provider_names[prov] for prov in providers]
 
     if mode == "batch":
         # Scale over batch size (n_hidden_states)
         config = triton.testing.Benchmark(
             x_names=["n_hidden_states"],
-            x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+            x_vals=x_vals,
             # x_vals=[1, 8, 16, 64, 128],
             x_log=True,
             line_arg="provider",
-            line_vals=[
-                "fused-triton",
-                "naive-compiled",
-                "jl-compiled",
-                "flashinfer:top_k_top_p_sampling_from_logits",
-                "flashinfer:sampling_from_logits",
-            ],
-            line_names=[
-                "Fused Triton",
-                "Naive Compiled",
-                "JL Compiled",
-                "flashinfer:top_k_top_p_sampling_from_logits",
-                "flashinfer:sampling_from_logits",
-            ],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-"), ("purple", "-")],
+            line_vals=providers,
+            line_names=lines_names,
+            styles=all_styles[: len(providers)],
             ylabel="Time (ms)",
             plot_name="fused-mm-sample-batch-scaling",
             args={},
@@ -63,6 +79,7 @@ def create_benchmark(mode: str):
             return _run_benchmark(hidden_states, weights, provider)
 
     elif mode == "vocab":
+        raise NotImplementedError("Please fix")
         # Scale over vocabulary size
         config = triton.testing.Benchmark(
             x_names=["vocab_size"],
@@ -126,26 +143,25 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
     return triton.testing.do_bench(fn, quantiles=quantiles)
 
 
-if __name__ == "__main__":
+def main(args: Args):
     modes = ["batch"]  # , "vocab"]
 
     for mode in modes:
         print("=" * 80)
         print(f"Benchmark Mode: {mode}")
         print("Configuration:")
-        if mode == "batch":
-            print(f"  vocab_size: {BASE_VOCAB_SIZE} (fixed)")
-            print("  n_hidden_states: 1 → 1024 (scaling)")
-        else:  # vocab mode
-            print(f"  vocab_size: {BASE_VOCAB_SIZE} → {BASE_VOCAB_SIZE // 16} (scaling)")
-            print("  n_hidden_states: 256 (fixed)")
         print(f"  hidden_size: {HIDDEN_SIZE}")
         print(f"  n_samples: {N_SAMPLES}")
         print(f"  temperature: {TEMPERATURE}")
         print()
 
-        benchmark = create_benchmark(mode)
+        benchmark = create_benchmark(args, mode)
         directory = "profiles/triton-bench/"
         os.makedirs(directory, exist_ok=True)
         benchmark.run(print_data=True, save_path=directory)
         print()
+
+
+if __name__ == "__main__":
+    args = Args()
+    main(args)
