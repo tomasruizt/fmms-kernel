@@ -73,6 +73,7 @@ def cdiv(n: int, div: int) -> int:
 MIN_BLOCK_SIZE_V = 32
 
 
+# @torch.compile(fullgraph=True)
 def fused_mm_sample_triton(
     weights: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -89,16 +90,20 @@ def fused_mm_sample_triton(
         )
 
     max_grid_size = triton.cdiv(V, MIN_BLOCK_SIZE_V)
-    maxs = float("-inf") * torch.ones(
+    maxs = torch.empty(
         (max_grid_size, n_hidden_states, num_samples),
         dtype=torch.bfloat16,
         device=weights.device,
     )
     maxs_idx = torch.empty_like(maxs, dtype=torch.long)
 
+    grid_size = {"v": None}
+
     def grid(meta):
+        grid_size_v = triton.cdiv(V, meta["BLOCK_SIZE_V"])
+        grid_size["v"] = grid_size_v
         return (
-            triton.cdiv(V, meta["BLOCK_SIZE_V"]),
+            grid_size_v,
             triton.cdiv(n_hidden_states, meta["BLOCK_SIZE_H"]),
         )
 
@@ -116,7 +121,8 @@ def fused_mm_sample_triton(
     )
 
     # 2nd stage: reduction
-    idxs = maxs.max(axis=0).indices
+    assert grid_size["v"] is not None
+    idxs = maxs[: grid_size["v"], :, :].max(axis=0).indices
     samples = maxs_idx.gather(dim=0, index=idxs[None, :])
     return samples.squeeze(0)  # [n_hidden_states, num_samples]
 

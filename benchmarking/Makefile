@@ -12,7 +12,8 @@ speed-test:
 
 NCU=$(shell which ncu)
 PYTHON=$(shell which python)
-N_HIDDEN_STATES=16
+N_HIDDEN_STATES=4
+N_RUNS_BENCHMARK=1
 
 # NCU profiling targets:
 # --import-source yes: Embeds source code into the .ncu-rep file, allowing it to be
@@ -44,26 +45,32 @@ ncu-profile-naive-compiled:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states 256
+		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES)
 
 
 nsight-profile-fused-triton:
 	mkdir -p profiles/nsight
 	nsys profile \
 		--force-overwrite true \
-		-o profiles/nsight/fused-triton python ./speed_test.py --name fused-triton
+		-o profiles/nsight/fused-triton python ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 nsight-profile-naive-compiled:
 	mkdir -p profiles/nsight
 	nsys profile \
 		--force-overwrite true \
-		-o profiles/nsight/naive-compiled python ./speed_test.py --name naive-compiled
+		-o profiles/nsight/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
+
+nsight-profile-flashinfer:
+	mkdir -p profiles/nsight
+	nsys profile \
+		--force-overwrite true \
+		-o profiles/nsight/flashinfer python ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 nsight-profile-naive-pt:
 	mkdir -p profiles/nsight
 	nsys profile \
 		--force-overwrite true \
-		-o profiles/nsight/naive-pt python ./speed_test.py --name naive-pt
+		-o profiles/nsight/naive-pt python ./speed_test.py --name naive-pt --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
 
 ncu-export-fused-triton:
 	mkdir -p profiles/ncu-txt
