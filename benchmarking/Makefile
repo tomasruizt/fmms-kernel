@@ -12,6 +12,7 @@ speed-test:
 
 NCU=$(shell which ncu)
 PYTHON=$(shell which python)
+N_HIDDEN_STATES=16
 
 # NCU profiling targets:
 # --import-source yes: Embeds source code into the .ncu-rep file, allowing it to be
@@ -21,13 +22,13 @@ PYTHON=$(shell which python)
 #   For Triton kernels, this helps NCU find the Python source files.
 ncu-profile-fused-triton:
 	mkdir -p profiles/ncu
-	sudo $(NCU) --set detailed \
+	$(NCU) --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
 		--source-folders $$(pwd)/../src/fused_mm_sampling \
 		--import-source yes \
-		-fo profiles/ncu/fused-triton $(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states 256
+		-fo profiles/ncu/fused-triton $(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES)
 
 
 ncu-profile-flashinfer:
@@ -35,7 +36,7 @@ ncu-profile-flashinfer:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		-fo profiles/ncu/flashinfer python ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states 1
+		-fo profiles/ncu/flashinfer python ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES)
 
 
 ncu-profile-naive-compiled:
@@ -43,7 +44,7 @@ ncu-profile-naive-compiled:
 	ncu --set detailed \
 		--nvtx \
 		--nvtx-include "kernel/" \
-		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states 1
+		-fo profiles/ncu/naive-compiled python ./speed_test.py --name naive-compiled --n_hidden_states 256
 
 
 nsight-profile-fused-triton:
@@ -66,20 +67,27 @@ nsight-profile-naive-pt:
 
 ncu-export-fused-triton:
 	mkdir -p profiles/ncu-txt
-	sudo $(NCU) --set full \
+	$(NCU) --set full \
 		--nvtx \
 		--nvtx-include "kernel/" \
 		--kernel-name fused_mm_sample_triton_kernel \
-		$(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states 256 > profiles/ncu-txt/fused-triton.txt
+		$(PYTHON) ./speed_test.py --name fused-triton --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/fused-triton.txt
 
 ncu-export-naive-compiled:
 	mkdir -p profiles/ncu-txt
-	ncu --nvtx \
+	$(NCU) --set full \
+		--nvtx \
 		--nvtx-include "kernel/" \
-		--launch-skip 10 \
-		python ./speed_test.py --name naive-compiled > profiles/ncu-txt/naive-compiled.txt
+		$(PYTHON) ./speed_test.py --name naive-compiled --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/naive-compiled.txt
 
-ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled
+ncu-export-flashinfer:
+	mkdir -p profiles/ncu-txt
+	$(NCU) --set full \
+		--nvtx \
+		--nvtx-include "kernel/" \
+		$(PYTHON) ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) > profiles/ncu-txt/flashinfer.txt
+
+ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-flashinfer
 	@echo "NCU reports exported to profiles/ncu-txt/"
 
 triton-benchmark:
