@@ -10,6 +10,7 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
 
     sns.lineplot(bdf_long, x="n_hidden_states", y="time[ms]", hue="provider", marker="o", ax=ax1)
     ax1.set_xscale("log")
+    ax1.set_yscale("log")
     unique_n_hidden = sorted(bdf_long["n_hidden_states"].unique())
     ax1.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
     ax1.grid(alpha=0.5)
