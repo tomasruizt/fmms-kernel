@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import pandas as pd
 import torch
-import triton
 from pydantic_settings import BaseSettings
 
 from fused_mm_sampling.core import get_sampler, sample
@@ -81,6 +80,7 @@ all_providers = [
 
 def benchmark(case: Case) -> pd.DataFrame:
     """Inspired by triton.testing.do_bench"""
+    import triton  # defer import for Modal compatibility
 
     print("=" * 80)
     print(f"Benchmarking {case.name}...")
@@ -134,8 +134,8 @@ def benchmark_all(cases: list[Case]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-if __name__ == "__main__":
-    args = Args()
+def run_speed_test(args: Args) -> None:
+    """Run a speed test for a given set of arguments."""
     if args.name is not None:
         cases = [args.as_case()]
     else:
@@ -151,3 +151,8 @@ if __name__ == "__main__":
 
     time_distribution = df.groupby("name")[["time[ms]"]].describe()
     print(time_distribution.sort_values(("time[ms]", "min")).round(2))
+
+
+if __name__ == "__main__":
+    args = Args()
+    run_speed_test(args)

@@ -157,3 +157,11 @@ MIT License - see LICENSE file for details
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+
+## Modal Setup
+Install and login to Modal:
+```bash
+uv pip install modal
+modal setup
+```
