@@ -27,8 +27,9 @@ class Args(BaseSettings, cli_parse_args=True):
 
 provider_names = {
     "fused-triton": "Fused Triton",
-    "naive-compiled": "Naive Compiled",
-    "jl-compiled": "JL Compiled",
+    "naive-compiled": "Naive PyTorch Compiled",
+    "naive-tl-matmul": "Naive Triton Matmul",
+    # "jl-compiled": "JL Compiled",
     "flashinfer:top_k_top_p_sampling_from_logits": "flashinfer:top_k_top_p_sampling_from_logits",
     "flashinfer:sampling_from_logits": "flashinfer:sampling_from_logits",
 }
