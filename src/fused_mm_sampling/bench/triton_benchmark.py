@@ -151,6 +151,7 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
 
 
 def run_triton_bechmark(args: Args):
+    print("Arguments:", args.model_dump_json())
     modes = ["batch"]  # , "vocab"]
 
     for mode in modes:
