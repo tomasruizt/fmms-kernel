@@ -1,11 +1,13 @@
-from ..bench.speed_test import Args, run_speed_test
-from .utils import make_app, make_image
+from pathlib import Path
 
-args = Args(n_hidden_states=4)
+from ..bench.speed_test import Args, run_speed_test
+from .utils import make_app, make_image, make_volumes, volume_path
+
+args = Args(n_hidden_states=4, tgt_dir=Path(volume_path) / "speed-test")
 app = make_app()
 
 
-@app.function(gpu="H100", image=make_image())
+@app.function(gpu="H100", image=make_image(), volumes=make_volumes())
 def speed_test(args: Args):
     run_speed_test(args)
 

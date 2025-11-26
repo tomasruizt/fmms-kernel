@@ -13,3 +13,10 @@ def make_image():
         "pydantic-settings",
     ]
     return img.pip_install(deps)
+
+
+volume_path = "/vol-fused-mm-sample"
+
+
+def make_volumes():
+    return {volume_path: modal.Volume.from_name("fused-mm-sample")}

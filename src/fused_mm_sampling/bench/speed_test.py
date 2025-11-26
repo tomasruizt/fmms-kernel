@@ -1,5 +1,6 @@
 import timeit
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 import torch
@@ -17,6 +18,7 @@ class Args(BaseSettings):
 
     n_hidden_states: int = 256
     n_samples: int = 1
+    tgt_dir: Path | None = None
 
     def as_case(self, name: str | None = None) -> "Case":
         if name is None:
@@ -150,3 +152,9 @@ def run_speed_test(args: Args) -> None:
 
     time_distribution = df.groupby("name")[["time[ms]"]].describe()
     print(time_distribution.sort_values(("time[ms]", "min")).round(2))
+
+    if args.tgt_dir is not None:
+        args.tgt_dir.mkdir(parents=True, exist_ok=True)
+        total_runtimes.to_csv(args.tgt_dir / "total-runtimes.csv")
+        time_distribution.to_csv(args.tgt_dir / "time-distribution.csv")
+        print("Saved results to ", args.tgt_dir)
