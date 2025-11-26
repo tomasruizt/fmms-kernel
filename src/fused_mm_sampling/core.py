@@ -171,25 +171,34 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
 
 @triton.autotune(
     configs=[
+        # triton.Config(
+        #     {
+        #         "BLOCK_SIZE_V": bsz_v,
+        #         "BLOCK_SIZE_D": bsz_d,
+        #         "BLOCK_SIZE_H": bsz_h,
+        #         "GROUP_SIZE_V": 4,
+        #         "BLOCK_SIZE_NSAMPLES": 1,
+        #     },
+        #     num_warps=num_warps,
+        #     num_stages=num_stages,
+        #     maxnreg=maxnreg,
+        # )
+        # for bsz_v in [MIN_BLOCK_SIZE_V, 4 * MIN_BLOCK_SIZE_V, 8 * MIN_BLOCK_SIZE_V]
+        # for bsz_d in [32, 64]
+        # for bsz_h in [1, 16, 64, 128, 256]
+        # for num_warps in [8]  # Default 4
+        # for maxnreg in [128]  # Previously 255
+        # for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
+        # if is_config_valid(bsz_v, bsz_d, bsz_h)
         triton.Config(
             {
-                "BLOCK_SIZE_V": bsz_v,
-                "BLOCK_SIZE_D": bsz_d,
-                "BLOCK_SIZE_H": bsz_h,
+                "BLOCK_SIZE_V": 64,
+                "BLOCK_SIZE_D": 32,
+                "BLOCK_SIZE_H": 16,
                 "GROUP_SIZE_V": 4,
                 "BLOCK_SIZE_NSAMPLES": 1,
-            },
-            num_warps=num_warps,
-            num_stages=num_stages,
-            maxnreg=maxnreg,
+            }
         )
-        for bsz_v in [MIN_BLOCK_SIZE_V, 4 * MIN_BLOCK_SIZE_V, 8 * MIN_BLOCK_SIZE_V]
-        for bsz_d in [32, 64]
-        for bsz_h in [16, 64, 128, 256]
-        for num_warps in [8]  # Default 4
-        for maxnreg in [128]  # Previously 255
-        for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
-        if is_config_valid(bsz_v, bsz_d, bsz_h)
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
     cache_results=True,
@@ -234,7 +243,7 @@ def fused_mm_sample_triton_kernel(
     logits_blk = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_H), dtype=tl.float32)
 
     # Compute a block of logits logits_blk
-    for d_start in range(0, hidden_size, BLOCK_SIZE_D):
+    for d_start in range(0, hidden_size, BLOCK_SIZE_D * BLOCK_SIZE_H):
         offsets_d = d_start + tl.arange(0, BLOCK_SIZE_D)
         mask_d = offsets_d < hidden_size
 
@@ -247,8 +256,9 @@ def fused_mm_sample_triton_kernel(
 
         # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
         hidden_states_blk = tl.load(
-            hidden_states_ptr + offsets_d[None, :] + hidden_size * offsets_h[:, None],
-            mask=mask_h[:, None] & mask_d[None, :],
+            hidden_states_ptr + offsets_d[None, :] + BLOCK_SIZE_D * offsets_h[:, None],
+            # mask=mask_h[:, None] & mask_d[None, :],
+            mask=offsets_d[None, :] + BLOCK_SIZE_D * offsets_h[:, None] < hidden_size,
         )
         logits_blk = tl.dot(w_blk.T, hidden_states_blk.T, acc=logits_blk)
 
@@ -286,6 +296,7 @@ def fused_mm_sample_triton_kernel(
         gumbel_max, gumbel_max_idx_local = tl.max(
             logits_blk + gumbel_noise, axis=1, return_indices=True
         )
+        gumbel_max2, gumbel_max_idx_local2 = tl.max(gumbel_max, axis=1, return_indices=True)
         gumbel_max_idx_global = gumbel_max_idx_local + v_start
 
         # Output offset for this batch

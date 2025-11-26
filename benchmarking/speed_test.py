@@ -1,7 +1,7 @@
 import os
 
 os.environ["TRITON_PRINT_AUTOTUNING"] = "1"
-# os.environ["TRITON_INTERPRET"] = "1"
+os.environ["TRITON_INTERPRET"] = "1"
 
 import timeit
 from dataclasses import dataclass
