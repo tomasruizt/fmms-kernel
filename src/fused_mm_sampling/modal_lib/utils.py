@@ -11,6 +11,7 @@ def make_image():
         "flashinfer-python",
         "pandas",
         "pydantic-settings",
+        "matplotlib",
     ]
     return img.pip_install(deps)
 

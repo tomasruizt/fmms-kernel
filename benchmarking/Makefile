@@ -112,7 +112,7 @@ ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-fla
 triton-benchmark:
 	@if [ -d profiles/triton-bench/ ]; then rm -rf profiles/triton-bench/; fi
 	mkdir -p profiles/triton-bench
-	PYTHONUNBUFFERED=1 $(PYTHON) triton_benchmark.py > profiles/triton-bench/logs.txt
+	PYTHONUNBUFFERED=1 $(PYTHON) triton_benchmark.py --tgt_dir profiles/triton-bench/ > profiles/triton-bench/logs.txt
 	$(PYTHON) plot-triton-bench.py
 
 clean-triton-autotunes:

@@ -3,6 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+from pydantic_settings import BaseSettings
 
 
 def plot_batch_scaling(bdf_long: pd.DataFrame):
@@ -44,7 +45,7 @@ def plot_vocab_scaling(vdf_long: pd.DataFrame) -> None:
     return ax
 
 
-def plot_relative_performance(bdf_rel_long: pd.DataFrame) -> None:
+def plot_relative_performance(bdf_rel_long: pd.DataFrame, ref_method: str) -> None:
     ax = sns.barplot(
         bdf_rel_long.query("provider == @ref_method or provider == 'Fused Triton'"),
         x="n_hidden_states",
@@ -64,8 +65,7 @@ def assign_col_samples_per_ms(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(**{"samples/ms": lambda df: df["n_hidden_states"] / df["time[ms]"]})
 
 
-if __name__ == "__main__":
-    folder = Path(__file__).parent / "profiles/triton-bench/"
+def create_and_triton_bench_plots(folder: Path):
     tgt_folder = folder / "custom-plots"
     bdf = pd.read_csv(folder / "fused-mm-sample-batch-scaling.csv")
     bdf_long = bdf.melt(id_vars=["n_hidden_states"], var_name="provider", value_name="time[ms]")
@@ -94,6 +94,16 @@ if __name__ == "__main__":
         id_vars=["n_hidden_states"], var_name="provider", value_name="relative-time"
     )
     bdf_rel_long["relative-perf"] = 1 / bdf_rel_long["relative-time"]
-    ax = plot_relative_performance(bdf_rel_long)
+    bdf_rel_long.round(3).to_csv(folder / "relative-performance.csv", index=False)
+    ax = plot_relative_performance(bdf_rel_long, ref_method)
     ax.figure.savefig(tgt_folder / "relative-performance.png", dpi=300)
     plt.close(ax.figure)
+
+
+class Args(BaseSettings, cli_parse_args=True):
+    tgt_dir: Path = Path(__file__).parent / "profiles/triton-bench/"
+
+
+if __name__ == "__main__":
+    args = Args()
+    create_and_triton_bench_plots(args.tgt_dir)
