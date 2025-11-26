@@ -1,12 +1,11 @@
-import modal
+from .utils import make_app, make_image
 
-app = modal.App("example-get-started")
-image = modal.Image.from_registry("pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel")
+app = make_app()
+image = make_image()
 
 
 def square(inner_dim: int):
     import torch
-    import triton
 
     device = torch.device("cuda")
     a = torch.randn(1000, inner_dim, device=device, dtype=torch.bfloat16)

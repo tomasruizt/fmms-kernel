@@ -160,8 +160,17 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 
 ## Modal Setup
+
 Install and login to Modal:
+
 ```bash
 uv pip install modal
 modal setup
+```
+
+Run the modal example, or speed-test:
+
+```bash
+make modal-example
+make modal-speed-test
 ```

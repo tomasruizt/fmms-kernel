@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from fused_mm_sampling.tl_matmul import matmul
+from .tl_matmul import matmul
 
 
 def sample(
