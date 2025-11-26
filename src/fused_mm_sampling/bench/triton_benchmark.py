@@ -32,7 +32,7 @@ class CliArgs(Args, cli_parse_args=True):
 
 
 provider_names = {
-    "fused-triton": "Fused Triton",
+    "fused-triton": "Fused Matmul-Sampling",
     "naive-compiled": "Naive PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",
     # "jl-compiled": "JL Compiled",
@@ -102,7 +102,7 @@ def create_benchmark(args: Args, mode: str):
                 "flashinfer:sampling_from_logits",
             ],
             line_names=[
-                "Fused Triton",
+                "Fused Matmul-Sampling",
                 "Naive Compiled",
                 "JL Compiled",
                 "flashinfer:top_k_top_p_sampling_from_logits",

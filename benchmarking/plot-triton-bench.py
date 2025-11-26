@@ -47,7 +47,7 @@ def plot_vocab_scaling(vdf_long: pd.DataFrame) -> None:
 
 def plot_relative_performance(bdf_rel_long: pd.DataFrame, ref_method: str) -> None:
     ax = sns.barplot(
-        bdf_rel_long.query("provider == @ref_method or provider == 'Fused Triton'"),
+        bdf_rel_long.query("provider == @ref_method or provider == 'Fused Matmul-Sampling'"),
         x="n_hidden_states",
         y="relative-perf",
         hue="provider",
