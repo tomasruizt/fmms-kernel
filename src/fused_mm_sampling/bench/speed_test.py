@@ -99,25 +99,28 @@ def benchmark(case: Case) -> pd.DataFrame:
     di.synchronize()
 
     cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()
+
+    def clear_l2_cache():
+        with torch.cuda.nvtx.range("clear-l2-cache"):
+            triton.runtime.driver.active.clear_cache(cache)
+
     start_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
     end_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
 
     print("Warming up...")
     for _ in range(case.n_runs_warmup):
-        triton.runtime.driver.active.clear_cache(cache)
+        clear_l2_cache()
         fn()
 
     print("Timing...")
-    with torch.cuda.nvtx.range("kernel"):
-        for _, start_event, end_event in zip(
-            range(case.n_runs_benchmark), start_events, end_events
-        ):
-            triton.runtime.driver.active.clear_cache(cache)
+    for _, start_event, end_event in zip(range(case.n_runs_benchmark), start_events, end_events):
+        clear_l2_cache()
+        with torch.cuda.nvtx.range("kernel"):
             start_event.record()
             timeit.timeit(fn, number=1)
             end_event.record()
         di.synchronize()
-        times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
+    times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
     results = {
         "name": case.name,
@@ -137,6 +140,7 @@ def benchmark_all(cases: list[Case]) -> pd.DataFrame:
 
 def run_speed_test(args: Args) -> None:
     """Run a speed test for a given set of arguments."""
+    print("Arguments: ", args)
     if args.name is not None:
         cases = [args.as_case()]
     else:

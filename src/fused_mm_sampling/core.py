@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 import flashinfer
+import nvtx
 import torch
 import triton
 import triton.language as tl
@@ -13,6 +14,7 @@ import triton.language as tl
 from .tl_matmul import matmul
 
 
+@nvtx.annotate()
 def sample(
     weights: torch.Tensor,  # [D, V]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
@@ -38,6 +40,7 @@ def sample(
 sample_compiled = torch.compile(sample)
 
 
+@nvtx.annotate()
 def incremental_sample_pt(
     weights: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -83,6 +86,7 @@ MIN_BLOCK_SIZE_V = 32
 
 
 # @torch.compile(fullgraph=True)
+@nvtx.annotate()
 def fused_mm_sample_triton(
     weights: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -439,6 +443,7 @@ def flashinfer_top_k_top_p_sampling_from_logits(
     return result.reshape(batch_size, num_samples)
 
 
+@nvtx.annotate()
 @torch.compile(fullgraph=True)
 def flashinfer_create_logits_and_indices(
     weights: torch.Tensor,  # [D, V]
@@ -456,6 +461,7 @@ def flashinfer_create_logits_and_indices(
     return logits, indices
 
 
+@nvtx.annotate()
 def flashinfer_sampling_from_logits(
     weights: torch.Tensor,  # [D, V]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
