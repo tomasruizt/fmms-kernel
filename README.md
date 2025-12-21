@@ -88,6 +88,19 @@ python speed_test.py --name naive-compiled
 python speed_test.py --name naive-pt
 ```
 
+### Relative Performance
+
+The following table shows the relative performance of the fused-matmul-sample kernel across different GPUs and batch sizes. Values are relative to `flashinfer:sampling_from_logits` (baseline = 1.0). Values > 1.0 indicate the fused kernel is faster, while values < 1.0 indicate it is slower.
+
+| GPU | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+|-----|---|---|---|---|----|----|----|-----|-----|-----|------|
+| L4 | 1.021 | 1.036 | 1.057 | 1.029 | 1.034 | 1.049 | 1.069 | 1.111 | 0.846 | 0.854 | 0.797 |
+| A100-80GB | 1.027 | 1.034 | 1.034 | 1.041 | 1.055 | 0.972 | 0.975 | 0.716 | 0.580 | 0.593 | 0.633 |
+| H100 | 1.060 | 1.061 | 1.058 | 1.062 | 1.066 | 1.018 | 1.012 | 0.980 | 0.701 | 0.634 | 0.626 |
+| B200 | 1.080 | 1.068 | 1.065 | 1.066 | 1.060 | 0.934 | 0.917 | 0.753 | 0.757 | 0.604 | 0.596 |
+
+*Table values represent relative performance (higher is better). Batch sizes (n_hidden_states) are shown in the column headers. Data as of 2025-12-21. Benchmarks were run on Modal GPUS.*
+
 ## Profiling
 
 All profiling scripts are located in the `benchmarking/` directory.
