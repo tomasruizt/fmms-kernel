@@ -36,4 +36,4 @@ samples = fused_mm_sample_triton(
 
 print(f"\nOutput shape: {samples.shape}")
 print(f"Sample values (first 10): {samples.flatten()[:10].tolist()}")
-print("\n✓ Example completed successfully!")
+print("\n✓ Example completed successfully! The next run should re-use the cached kernel.")

@@ -101,6 +101,19 @@ The following table shows the relative performance of the fused-matmul-sample ke
 
 *Table values represent relative performance (higher is better). Batch sizes (n_hidden_states) are shown in the column headers. Data as of 2025-12-21. Benchmarks were run on Modal GPUS.*
 
+### H100 Absolute Performance
+
+The following table shows the absolute execution times (in milliseconds) of the fused matmul-sampling kernel versus several strong baselines on H100 across various batch sizes.
+
+| Algorithm | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+|-----------|---|---|---|---|----|----|----|-----|-----|-----|------|
+| Fused Matmul-Sampling | 1.383 | 1.384 | 1.392 | 1.393 | 1.400 | 1.478 | 1.520 | 1.734 | 3.126 | 6.123 | 12.177 |
+| Naive PyTorch Compiled | 1.469 | 1.475 | 1.480 | 1.493 | 1.520 | 1.549 | 1.620 | 1.900 | 2.497 | 4.342 | 8.284 |
+| flashinfer:top_k_top_p_sampling_from_logits | 1.708 | 1.739 | 1.741 | 1.753 | 1.774 | 1.847 | 2.048 | 2.407 | 3.486 | 6.303 | 12.347 |
+| flashinfer:sampling_from_logits | 1.466 | 1.469 | 1.472 | 1.480 | 1.492 | 1.505 | 1.538 | 1.700 | 2.191 | 3.881 | 7.629 |
+
+*Table values represent execution time in milliseconds (lower is better). Batch sizes (n_hidden_states) are shown in the column headers. Data from H100 benchmarks run on Modal, as of 2025-12-21.*
+
 ## Profiling
 
 All profiling scripts are located in the `benchmarking/` directory.
