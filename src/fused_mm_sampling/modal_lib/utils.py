@@ -12,8 +12,9 @@ def make_image():
         "pandas",
         "pydantic-settings",
         "matplotlib",
+        "nvtx",
     ]
-    return img.pip_install(deps)
+    return img.uv_pip_install(deps)
 
 
 volume_path = "/vol-fused-mm-sample"
