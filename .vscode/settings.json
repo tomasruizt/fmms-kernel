@@ -4,5 +4,8 @@
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
-    "makefile.configureOnOpen": false
+    "makefile.configureOnOpen": false,
+    "search.exclude": {
+        "**/.venv": true
+    }
 }
