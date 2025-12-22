@@ -1,9 +1,7 @@
-# import os
-
-# os.environ["TRITON_INTERPRET"] = "1"
 import math
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from functools import lru_cache
+from typing import Callable, Optional, Protocol
 
 import flashinfer
 import nvtx
@@ -102,9 +100,9 @@ def fused_mm_sample_triton(
             f"weights first dimension ({D})"
         )
 
-    max_grid_size = triton.cdiv(V, MIN_BLOCK_SIZE_V)
+    max_grid_size_v = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = torch.empty(
-        (max_grid_size, n_hidden_states, num_samples),
+        (num_samples, max_grid_size_v, n_hidden_states),
         dtype=torch.bfloat16,
         device=weights.device,
     )
@@ -131,13 +129,23 @@ def fused_mm_sample_triton(
         num_samples=num_samples,
         temperature=temperature,
         seed=seed,
+        max_grid_size_v=max_grid_size_v,
+        WARP_SPECIALIZE=supports_warp_specialization(),
     )
 
     # 2nd stage: reduction
     assert grid_size["v"] is not None
-    idxs = maxs[: grid_size["v"], :, :].max(axis=0).indices
-    samples = maxs_idx.gather(dim=0, index=idxs[None, :])
-    return samples.squeeze(0)  # [n_hidden_states, num_samples]
+    idxs = maxs[:, : grid_size["v"], :].max(axis=1).indices
+    samples = maxs_idx.gather(dim=1, index=idxs[:, None])
+    return samples.squeeze(1).T  # [n_hidden_states, num_samples]
+
+
+@lru_cache
+def supports_warp_specialization():
+    is_cuda = triton.runtime.driver.active.get_current_target().backend == "cuda"
+    supports_ws = is_cuda and torch.cuda.get_device_capability()[0] >= 9
+    print("Supports warp specialization:", supports_ws)
+    return supports_ws
 
 
 def clip(low, high, x):
@@ -153,10 +161,10 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
     # - logits_blk: bsz_v * bsz_h * 4 bytes (float32, persists)
     # - w_blk: bsz_v * bsz_d * 2 bytes (bfloat16, during matmul)
     # - hidden_states_blk: bsz_h * bsz_d * 2 bytes (bfloat16, during matmul)
-    # - noise: bsz_v * bsz_h * 4 bytes (float32, BLOCK_SIZE_NSAMPLES=1)
-    # - gumbel_noise: bsz_v * bsz_h * 4 bytes (float32, BLOCK_SIZE_NSAMPLES=1)
+    # - noise: bsz_v * bsz_h * 4 bytes (float32)
+    # - gumbel_noise: bsz_v * bsz_h * 4 bytes (float32)
 
-    # Peak memory during sampling phase (BLOCK_SIZE_NSAMPLES=1):
+    # Peak memory during sampling phase:
     # logits_blk + gumbel_noise = bsz_v * bsz_h * (4 + 4) bytes
     # = bsz_v * bsz_h * 8 bytes per element
     bytes_per_elem = 8
@@ -181,7 +189,6 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
                 "BLOCK_SIZE_D": bsz_d,
                 "BLOCK_SIZE_H": bsz_h,
                 "GROUP_SIZE_V": 4,
-                "BLOCK_SIZE_NSAMPLES": 1,
             },
             num_warps=num_warps,
             num_stages=num_stages,
@@ -202,8 +209,8 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
 def fused_mm_sample_triton_kernel(
     weights_ptr,  # [D, V]
     hidden_states_ptr,  # [n_hidden_states, D]
-    max_out_ptr,  # [grid_size, n_hidden_states, num_samples]
-    max_out_idx_ptr,  # [grid_size, n_hidden_states, num_samples]
+    max_out_ptr,  # [num_samples, max_grid_size_v, n_hidden_states]
+    max_out_idx_ptr,  # [num_samples, max_grid_size_v, n_hidden_states]
     vocab_size,  # V
     hidden_size: tl.constexpr,  # D
     n_hidden_states: tl.constexpr,
@@ -213,8 +220,9 @@ def fused_mm_sample_triton_kernel(
     BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_D: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_H: tl.constexpr,  # noqa: N803
-    BLOCK_SIZE_NSAMPLES: tl.constexpr,  # noqa: N803
     GROUP_SIZE_V: tl.constexpr,  # noqa: N803
+    max_grid_size_v: tl.constexpr,
+    WARP_SPECIALIZE: tl.constexpr,  # noqa: N803
 ):
     # Compute a different program ordering to exploit L2 cache, as suggested in
     # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -232,28 +240,38 @@ def fused_mm_sample_triton_kernel(
     offsets_v = v_start + tl.arange(0, BLOCK_SIZE_V)
     mask_v = offsets_v < vocab_size
 
-    # H-tile within n_hidden_states
-    offsets_h = h_start + tl.arange(0, BLOCK_SIZE_H)
-    mask_h = offsets_h < n_hidden_states
     logits_blk = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_H), dtype=tl.float32)
 
+    w_desc = tl.make_tensor_descriptor(
+        weights_ptr,
+        shape=[hidden_size, vocab_size],
+        strides=[vocab_size, 1],
+        block_shape=[BLOCK_SIZE_D, BLOCK_SIZE_V],
+    )
+    hidden_states_desc = tl.make_tensor_descriptor(
+        hidden_states_ptr,
+        shape=[n_hidden_states, hidden_size],
+        strides=[hidden_size, 1],
+        block_shape=[BLOCK_SIZE_H, BLOCK_SIZE_D],
+    )
+    max_desc = tl.make_tensor_descriptor(
+        max_out_ptr,
+        shape=[num_samples, max_grid_size_v, n_hidden_states],
+        strides=[max_grid_size_v * n_hidden_states, n_hidden_states, 1],
+        block_shape=[1, 1, BLOCK_SIZE_H],
+    )
+    max_idx_desc = tl.make_tensor_descriptor(
+        max_out_idx_ptr,
+        shape=[num_samples, max_grid_size_v, n_hidden_states],
+        strides=[max_grid_size_v * n_hidden_states, n_hidden_states, 1],
+        block_shape=[1, 1, BLOCK_SIZE_H],
+    )
     # Compute a block of logits logits_blk
-    for d_start in range(0, hidden_size, BLOCK_SIZE_D):
-        offsets_d = d_start + tl.arange(0, BLOCK_SIZE_D)
-        mask_d = offsets_d < hidden_size
-
-        # w_offsets = offsets_d[None, :] * vocab_size + offsets_v[:, None]
-        w_offsets = offsets_v[None, :] + vocab_size * offsets_d[:, None]
-        w_blk = tl.load(
-            weights_ptr + w_offsets,
-            mask=mask_v[None, :] & mask_d[:, None],
-        )
-
+    for d_start in range(0, hidden_size, BLOCK_SIZE_D, warp_specialize=WARP_SPECIALIZE):
+        # load weights tile [BLOCK_SIZE_D, BLOCK_SIZE_V]
+        w_blk = w_desc.load([d_start, v_start])
         # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
-        hidden_states_blk = tl.load(
-            hidden_states_ptr + offsets_d[None, :] + hidden_size * offsets_h[:, None],
-            mask=mask_h[:, None] & mask_d[None, :],
-        )
+        hidden_states_blk = hidden_states_desc.load([h_start, d_start])
         logits_blk = tl.dot(w_blk.T, hidden_states_blk.T, acc=logits_blk)
 
     # Later we will take max over logits + noise, but rows outside the mask
@@ -261,58 +279,46 @@ def fused_mm_sample_triton_kernel(
     logits_blk = tl.where(mask_v[:, None], logits_blk, -float("inf"))
     logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
 
-    # Process samples in batches to limit memory usage
-    samples_n_batches: tl.constexpr = triton.cdiv(num_samples, BLOCK_SIZE_NSAMPLES)
-    for batch_idx in range(samples_n_batches):
-        # Calculate how many samples in this batch
-        batch_start = batch_idx * BLOCK_SIZE_NSAMPLES
-        batch_end = min(batch_start + BLOCK_SIZE_NSAMPLES, num_samples)
-        actual_batch_size = batch_end - batch_start
-
+    for sample_idx in range(num_samples):
         # Note: Creating appropriately sized tensors is tricky because
         # tl.arange() only accepts tl.constexpr that are powers of 2.
-        noise_size: tl.constexpr = BLOCK_SIZE_V * BLOCK_SIZE_H * BLOCK_SIZE_NSAMPLES
-        noise_offsets = tl.arange(0, noise_size).reshape(
-            (BLOCK_SIZE_NSAMPLES, BLOCK_SIZE_V, BLOCK_SIZE_H)
-        )
+        noise_size: tl.constexpr = BLOCK_SIZE_V * BLOCK_SIZE_H
+        noise_offsets = tl.arange(0, noise_size).reshape((BLOCK_SIZE_V, BLOCK_SIZE_H))
         # Note: Each tile (v, h) and batch of samples needs a different seed,
         # otherwise they all create the same noise, leading to sampling artifacts.
         # Compute gumbel noise directly to reduce register pressure
         gumbel_noise = -tl.log(
             -tl.log(
                 tl.rand(
-                    seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
+                    seed + pid_v * 100 + pid_h * 1_000 + sample_idx * 10_000,
                     noise_offsets,
                 )
             )
         )
 
         gumbel_max, gumbel_max_idx_local = tl.max(
-            logits_blk + gumbel_noise, axis=1, return_indices=True
+            logits_blk + gumbel_noise, axis=0, return_indices=True
         )
         gumbel_max_idx_global = gumbel_max_idx_local + v_start
 
-        # Output offset for this batch
-        out_blk_start = pid_v * n_hidden_states * num_samples + batch_start
+        max_desc.store(
+            [sample_idx, pid_v, pid_h * BLOCK_SIZE_H],
+            gumbel_max[None, None, :],
+        )
+        max_idx_desc.store(
+            [sample_idx, pid_v, pid_h * BLOCK_SIZE_H],
+            gumbel_max_idx_global[None, None, :],
+        )
 
-        # Note: It makes a difference if indices are row-major or column-major
-        # Note: The stride needs to match the non-padded shape!
-        out_offsets = (
-            tl.arange(0, BLOCK_SIZE_NSAMPLES)[:, None]
-            + num_samples * (h_start + tl.arange(0, BLOCK_SIZE_H))[None, :]
-        )
-        mask_nsamples = tl.arange(0, BLOCK_SIZE_NSAMPLES) < actual_batch_size
-        out_mask = mask_nsamples[:, None] & mask_h[None, :]
-        tl.store(
-            max_out_ptr + out_blk_start + out_offsets,
-            gumbel_max,
-            mask=out_mask,
-        )
-        tl.store(
-            max_out_idx_ptr + out_blk_start + out_offsets,
-            gumbel_max_idx_global,
-            mask=out_mask,
-        )
+
+def set_torch_allocator_for_tma_descriptors():
+    """From https://triton-lang.org/main/python-api/generated/triton.language.make_tensor_descriptor.html"""
+    # TMA descriptors require a global memory allocation
+    triton.set_allocator(alloc_on_cuda)
+
+
+def alloc_on_cuda(size: int, alignment: int, stream: Optional[int]):
+    return torch.empty(size, device="cuda", dtype=torch.int8)
 
 
 class Sampler(Protocol):

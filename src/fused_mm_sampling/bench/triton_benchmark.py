@@ -7,11 +7,13 @@ import torch
 import triton
 from pydantic_settings import BaseSettings
 
-from ..core import get_sampler
+from ..core import get_sampler, set_torch_allocator_for_tma_descriptors
 
 # prevent torch._dynamo.exc.FailOnRecompileLimitHit: recompile_limit reached with fullgraph=True
 assert torch._dynamo.config.cache_size_limit == 8
 torch._dynamo.config.cache_size_limit = 1_000
+
+set_torch_allocator_for_tma_descriptors()
 
 device = torch.device("cuda")
 
@@ -49,7 +51,7 @@ def create_benchmark(args: Args, mode: str):
     if args.n_hidden_states is not None:
         x_vals = [args.n_hidden_states]
     else:
-        x_vals = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+        x_vals = [1, 2, 4, 8, 16, 32, 64]  # 128, 256, 512, 1024]
 
     if args.name is not None:
         providers = [args.name]
