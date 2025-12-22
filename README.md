@@ -92,7 +92,7 @@ python speed_test.py --name naive-pt
 
 The following table shows the relative performance of the fused-matmul-sample kernel across different GPUs and batch sizes. Values are relative to `flashinfer:sampling_from_logits` (baseline = 1.0). Values > 1.0 indicate the fused kernel is faster, while values < 1.0 indicate it is slower.
 
-| GPU | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+| GPU / Batch Size | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
 |-----|---|---|---|---|----|----|----|-----|-----|-----|------|
 | L4 | 1.021 | 1.036 | 1.057 | 1.029 | 1.034 | 1.049 | 1.069 | 1.111 | 0.846 | 0.854 | 0.797 |
 | A100-80GB | 1.027 | 1.034 | 1.034 | 1.041 | 1.055 | 0.972 | 0.975 | 0.716 | 0.580 | 0.593 | 0.633 |
@@ -105,7 +105,8 @@ The following table shows the relative performance of the fused-matmul-sample ke
 
 The following table shows the absolute execution times (in milliseconds) of the fused matmul-sampling kernel versus several strong baselines on H100 across various batch sizes.
 
-| Algorithm | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+
+| Algorithm / Batch Size | 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
 |-----------|---|---|---|---|----|----|----|-----|-----|-----|------|
 | Fused Matmul-Sampling | 1.383 | 1.384 | 1.392 | 1.393 | 1.400 | 1.478 | 1.520 | 1.734 | 3.126 | 6.123 | 12.177 |
 | Naive PyTorch Compiled | 1.469 | 1.475 | 1.480 | 1.493 | 1.520 | 1.549 | 1.620 | 1.900 | 2.497 | 4.342 | 8.284 |
