@@ -1,6 +1,7 @@
 benchmarking/profiles/
 benchmarking/modal-results/
 benchmarking/modal-results*
+benchmarking/data/*.png
 tests/qwen3-0.6b/hidden_states.pt
 tests/qwen3-0.6b/weights.pt
 
