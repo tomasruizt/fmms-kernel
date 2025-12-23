@@ -14,7 +14,7 @@ from .tl_matmul import matmul
 
 @nvtx.annotate()
 def sample(
-    weights: torch.Tensor,  # [D, V]
+    weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
     temperature: float,
@@ -27,7 +27,7 @@ def sample(
     if tl_matmul:
         logits = matmul(hidden_states, weights)  # [n_hidden_states, V]
     else:
-        logits = hidden_states @ weights  # [n_hidden_states, V]
+        logits = hidden_states @ weights.T  # [n_hidden_states, V]
     probs = (logits / temperature).softmax(dim=1)
     samples = torch.multinomial(probs, num_samples=num_samples, replacement=True)
     if return_probs:
@@ -39,32 +39,30 @@ sample_compiled = torch.compile(sample)
 
 
 @nvtx.annotate()
+@torch.compile(fullgraph=True)
 def incremental_sample_pt(
-    weights: torch.Tensor,
-    hidden_states: torch.Tensor,
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
     temperature: float,
 ):
     device = weights.device
-    D, V = weights.shape  # noqa: N806
-    n_hidden_states, hidden_size_hidden_states = hidden_states.shape  # noqa: N806
-    if hidden_size_hidden_states != D:
+    V, D = weights.shape  # noqa: N806
+    H, D2 = hidden_states.shape  # noqa: N806
+    if D2 != D:
         raise ValueError(
-            f"hidden_states second dimension ({hidden_size_hidden_states}) must match "
-            f"weights first dimension ({D})"
+            f"hidden_states second dimension ({D2}) must match weights first dimension ({D})"
         )
-    block_size = 8
+    block_size = 128
     # compute logits blocks
-    gumbel_max = float("-inf") * torch.ones(size=(num_samples, n_hidden_states), device=device)
-    gumbel_max_idx = torch.empty(
-        size=(num_samples, n_hidden_states), dtype=torch.long, device=device
-    )
+    gumbel_max = torch.full((num_samples, H), float("-inf"), device=device)
+    gumbel_max_idx = torch.empty(size=(num_samples, H), dtype=torch.long, device=device)
     n_blocks = cdiv(V, block_size)
     for blk_idx in range(n_blocks):
         idx_from = blk_idx * block_size
         idx_to = (blk_idx + 1) * block_size
-        w_blk = weights[:, idx_from:idx_to]  # [D, block_size]
-        logits_blk = hidden_states @ w_blk / temperature  # [n_hidden_states, block_size]
+        w_blk = weights[idx_from:idx_to, :]  # [block_size, D]
+        logits_blk = hidden_states @ w_blk.T / temperature  # [n_hidden_states, block_size]
         unif_noise = torch.rand((num_samples, *logits_blk.shape), device=device)
         gumbel_noise = -(-unif_noise.log()).log()
         new_max, new_max_idx_local = torch.max(logits_blk + gumbel_noise, dim=2)
@@ -86,23 +84,22 @@ MIN_BLOCK_SIZE_V = 32
 # @torch.compile(fullgraph=True)
 @nvtx.annotate()
 def fused_mm_sample_triton(
-    weights: torch.Tensor,
-    hidden_states: torch.Tensor,
+    weights: torch.Tensor,  # [V, D]
+    hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
     temperature: float,
     seed: int,
 ):
-    D, V = weights.shape  # noqa: N806
-    n_hidden_states, hidden_size_hidden_states = hidden_states.shape  # noqa: N806
-    if hidden_size_hidden_states != D:
+    V, D = weights.shape  # noqa: N806
+    H, D2 = hidden_states.shape  # noqa: N806
+    if D2 != D:
         raise ValueError(
-            f"hidden_states second dimension ({hidden_size_hidden_states}) must match "
-            f"weights first dimension ({D})"
+            f"hidden_states second dimension ({D2}) must match weights second dimension ({D})"
         )
 
     max_grid_size_v = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = torch.empty(
-        (num_samples, max_grid_size_v, n_hidden_states),
+        (num_samples, max_grid_size_v, H),
         dtype=torch.bfloat16,
         device=weights.device,
     )
@@ -115,17 +112,17 @@ def fused_mm_sample_triton(
         grid_size["v"] = grid_size_v
         return (
             grid_size_v,
-            triton.cdiv(n_hidden_states, meta["BLOCK_SIZE_H"]),
+            triton.cdiv(H, meta["BLOCK_SIZE_H"]),
         )
 
     fused_mm_sample_triton_kernel[grid](
-        weights_ptr=weights.contiguous(),
-        hidden_states_ptr=hidden_states.contiguous(),
+        weights_ptr=weights,
+        hidden_states_ptr=hidden_states,
         max_out_ptr=maxs,
         max_out_idx_ptr=maxs_idx,
         vocab_size=V,
         hidden_size=D,
-        n_hidden_states=n_hidden_states,
+        n_hidden_states=H,
         num_samples=num_samples,
         temperature=temperature,
         seed=seed,
@@ -207,7 +204,7 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
 )
 @triton.jit
 def fused_mm_sample_triton_kernel(
-    weights_ptr,  # [D, V]
+    weights_ptr,  # [V, D]
     hidden_states_ptr,  # [n_hidden_states, D]
     max_out_ptr,  # [num_samples, max_grid_size_v, n_hidden_states]
     max_out_idx_ptr,  # [num_samples, max_grid_size_v, n_hidden_states]
@@ -244,9 +241,9 @@ def fused_mm_sample_triton_kernel(
 
     w_desc = tl.make_tensor_descriptor(
         weights_ptr,
-        shape=[hidden_size, vocab_size],
-        strides=[vocab_size, 1],
-        block_shape=[BLOCK_SIZE_D, BLOCK_SIZE_V],
+        shape=[vocab_size, hidden_size],
+        strides=[hidden_size, 1],
+        block_shape=[BLOCK_SIZE_V, BLOCK_SIZE_D],
     )
     hidden_states_desc = tl.make_tensor_descriptor(
         hidden_states_ptr,
@@ -268,11 +265,11 @@ def fused_mm_sample_triton_kernel(
     )
     # Compute a block of logits logits_blk
     for d_start in range(0, hidden_size, BLOCK_SIZE_D, warp_specialize=WARP_SPECIALIZE):
-        # load weights tile [BLOCK_SIZE_D, BLOCK_SIZE_V]
-        w_blk = w_desc.load([d_start, v_start])
+        # load weights tile [BLOCK_SIZE_V, BLOCK_SIZE_D]
+        w_blk = w_desc.load([v_start, d_start])
         # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
         hidden_states_blk = hidden_states_desc.load([h_start, d_start])
-        logits_blk = tl.dot(w_blk.T, hidden_states_blk.T, acc=logits_blk)
+        logits_blk = tl.dot(w_blk, hidden_states_blk.T, acc=logits_blk)
 
     # Later we will take max over logits + noise, but rows outside the mask
     # should not be considered. Setting them to -inf achieves this.
@@ -342,35 +339,40 @@ class SimpleSampler(Sampler):
 
 @dataclass
 class JLSampler(Sampler):
-    weights: torch.Tensor  # [D, V]
+    weights: torch.Tensor  # [V, D]
     k: int
     prepared: bool = False
 
     @classmethod
-    def from_weights(cls, weights: torch.Tensor, epsilon: float = 0.2) -> "JLSampler":
-        k = optimal_k(n=weights.shape[1], epsilon=epsilon)
+    def from_weights(
+        cls,
+        weights: torch.Tensor,  # [V, D]
+        epsilon: float = 0.2,
+    ) -> "JLSampler":
+        k = optimal_k(n=weights.shape[0], epsilon=epsilon)
         print(f"JLSampler optimal k={k}")
         return cls(weights, k=k)
 
     def prepare(self) -> "JLSampler":
-        D = self.weights.shape[0]  # noqa: N806
+        D = self.weights.shape[1]  # noqa: N806
         self.rand_mat = torch.randn(
             (D, self.k),
             dtype=self.weights.dtype,
             device=self.weights.device,
         ) / math.sqrt(self.k)
-        self.w_p = self.rand_mat.T @ self.weights  # [k, V]
+        self.w_p = self.weights @ self.rand_mat  # [V, k]
+        self.w_p = self.w_p.contiguous()
         self.prepared = True
         self.weights = None  # not needed anymore
         return self
 
-    @torch.compile
+    @torch.compile(fullgraph=True)
     def sample(
         self,
         hidden_states: torch.Tensor,  # [n_hidden_states, D]
         temperature: float,
         num_samples: int,
-        seed: int = None,
+        seed: int | None = None,  # ignored
         weights: torch.Tensor = None,  # ignored
     ):
         """
@@ -378,8 +380,6 @@ class JLSampler(Sampler):
         """
         if not self.prepared:
             raise ValueError("Sampler not prepared. Call .prepare() first.")
-        if seed is not None:
-            torch.manual_seed(seed)
         logits_p = self.compute_logits(hidden_states)
         probs = (logits_p / temperature).softmax(dim=1)
         samples = torch.multinomial(probs, num_samples=num_samples, replacement=True)
@@ -390,7 +390,7 @@ class JLSampler(Sampler):
         hidden_states: torch.Tensor,  # [n_hidden_states, D]
     ) -> torch.Tensor:
         h_p = hidden_states @ self.rand_mat  # [n_hidden_states, k]
-        return h_p @ self.w_p  # [n_hidden_states, V]
+        return h_p @ self.w_p.T  # [n_hidden_states, V]
 
     def rrt(self) -> torch.Tensor:
         """Return R @ Rᵀ, which should be close to the identity matrix."""
@@ -429,7 +429,7 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
 
 
 def flashinfer_top_k_top_p_sampling_from_logits(
-    weights: torch.Tensor,  # [D, V]
+    weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
     temperature: float,
@@ -452,14 +452,15 @@ def flashinfer_top_k_top_p_sampling_from_logits(
 @nvtx.annotate()
 @torch.compile(fullgraph=True)
 def flashinfer_create_logits_and_indices(
-    weights: torch.Tensor,  # [D, V]
+    weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
     temperature: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = weights.device
     batch_size = hidden_states.shape[0]
-    logits = hidden_states @ weights  # [batch_size, vocab]
+    assert weights.shape[1] == hidden_states.shape[1], "weights must transposed"
+    logits = hidden_states @ weights.T  # [batch_size, vocab]
     logits = (logits / temperature).contiguous()
     indices = torch.repeat_interleave(
         torch.arange(batch_size, device=device, dtype=torch.int32), num_samples

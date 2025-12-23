@@ -64,7 +64,7 @@ class Case:
             hidden_states=torch.randn(
                 (self.n_hidden_states, hidden_size), dtype=torch.bfloat16, device=device
             ),
-            weights=torch.randn((hidden_size, vocab_size), dtype=torch.bfloat16, device=device),
+            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16, device=device),
             num_samples=self.n_samples,
             temperature=1.0,
         )

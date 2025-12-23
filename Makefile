@@ -28,3 +28,11 @@ modal-get-results-speed-test:
 modal-get-results-triton-bench:
 	mkdir -p benchmarking/modal-results/
 	cd benchmarking/modal-results/ && modal volume get fused-mm-sample triton-bench-$(GPU)
+
+modal-persistent-matmul:
+	GPU=$(GPU) \
+	modal run -m src.fused_mm_sampling.modal_lib.modal_persistent_matmul
+
+modal-matmul-comparison:
+	GPU=$(GPU) \
+	modal run -m src.fused_mm_sampling.modal_lib.modal_matmul_comparison

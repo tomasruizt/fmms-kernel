@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -19,13 +21,11 @@ import triton.language as tl
             },
             num_warps=num_warps,
             num_stages=num_stages,
-            maxnreg=maxnreg,
         )
         for bsz_v in [32, 4 * 32, 8 * 32]
         for bsz_d in [32, 64]
         for bsz_h in [16, 64, 128, 256]
         for num_warps in [8]  # Default 4
-        for maxnreg in [128]  # Previously 255
         for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
     ],
     key=["M", "N", "K"],
@@ -34,22 +34,13 @@ import triton.language as tl
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr,
-    b_ptr,
+    a_ptr,  # [M, K]
+    b_ptr,  # [N, K]
     c_ptr,
     # Matrix dimensions
     M,  # noqa: N803
     N,  # noqa: N803
     K,  # noqa: N803
-    # The stride variables represent how much to increase the ptr by when moving by 1
-    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-    # by to get the element one row down (A has M rows).
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_N: tl.constexpr,  # noqa: N803
@@ -58,8 +49,33 @@ def matmul_kernel(
     ACTIVATION: tl.constexpr,  # noqa: N803
 ):
     """Kernel for computing the matmul C = A x B.
-    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    A has shape (M, K), B has shape (N, K) and C has shape (M, N).
+    Uses device-side tensor descriptors (TMA) for efficient memory access.
     """
+    # -----------------------------------------------------------
+    # Create device-side tensor descriptors for TMA
+    # A: [M, K] row-major contiguous
+    # B: [N, K] row-major contiguous (transposed for A @ B.T)
+    # C: [M, N] row-major contiguous
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr,
+        shape=[N, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr,
+        shape=[M, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+    )
+
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # Process N dimension first, then M (matching fused kernel pattern).
@@ -73,31 +89,9 @@ def matmul_kernel(
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     pid_n, pid_m = tl.swizzle2d(pid_n, pid_m, num_pid_n, num_pid_m, GROUP_SIZE_M)
 
-    # -----------------------------------------------------------
-    # Add some integer bound assumptions.
-    # This helps to guide integer analysis in the backend to optimize
-    # load/store offset address calculation
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
-    tl.assume(stride_bn > 0)
-    tl.assume(stride_bk > 0)
-    tl.assume(stride_cm > 0)
-    tl.assume(stride_cn > 0)
-
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction
-    # and accumulate
-    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
-    # See above `Pointer Arithmetic` section for details
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    # Block starting offsets
+    offs_am = pid_m * BLOCK_SIZE_M
+    offs_bn = pid_n * BLOCK_SIZE_N
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -106,15 +100,13 @@ def matmul_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the K dimension.
-        # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        offs_k = k * BLOCK_SIZE_K
+        # Load blocks using tensor descriptors (TMA handles bounds automatically)
+        a = a_desc.load([offs_am, offs_k])
+        b = b_desc.load([offs_bn, offs_k])
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, accumulator)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        accumulator = tl.dot(a, b.T, accumulator)
+
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     if ACTIVATION == "leaky_relu":
@@ -122,12 +114,10 @@ def matmul_kernel(
     c = accumulator.to(tl.bfloat16)
 
     # -----------------------------------------------------------
-    # Write back the block of the output matrix C with masks.
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    # Write back the block of the output matrix C using tensor descriptor
+    offs_cm = pid_m * BLOCK_SIZE_M
+    offs_cn = pid_n * BLOCK_SIZE_N
+    c_desc.store([offs_cm, offs_cn], c)
 
 
 # We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `matmul_kernel`.
@@ -138,12 +128,19 @@ def leaky_relu(x):
 
 def matmul(a, b, activation=""):
     # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
+    assert b.is_contiguous(), "Matrix B must be contiguous"
     M, K = a.shape  # noqa: N806
-    K, N = b.shape  # noqa: N806
+    N, K = b.shape  # noqa: N806
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
+
+    # TMA descriptors require a global memory allocation
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device="cuda", dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
 
     # 2D launch kernel with N first to match fused kernel pattern.
     # This enables processing many N blocks for the same M block,
@@ -161,12 +158,14 @@ def matmul(a, b, activation=""):
         M,  # noqa: N803
         N,  # noqa: N803
         K,  # noqa: N803
-        a.stride(0),
-        a.stride(1),  #
-        b.stride(0),
-        b.stride(1),  #
-        c.stride(0),
-        c.stride(1),  #
         ACTIVATION=activation,  #
     )
     return c
+
+
+def get_cublas():
+    from triton._C.libtriton import nvidia
+
+    device_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
+    cublas = nvidia.cublas.CublasLt(device_workspace)
+    return cublas
