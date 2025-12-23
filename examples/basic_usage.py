@@ -21,8 +21,8 @@ print(f"  vocab_size = {vocab_size:,}")
 print(f"  hidden_size = {hidden_size:,}")
 print(f"  n_hidden_states = {n_hidden_states:,}")
 
-# Create random inputs
-weights = torch.randn(hidden_size, vocab_size, dtype=torch.bfloat16, device=device)
+# Create random inputs. The weights are transposed for the matmul.
+weights = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16, device=device)
 hidden_states = torch.randn(n_hidden_states, hidden_size, dtype=torch.bfloat16, device=device)
 
 # Sample from categorical distribution using fused Triton kernel

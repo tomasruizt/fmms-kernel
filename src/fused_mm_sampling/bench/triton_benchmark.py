@@ -81,7 +81,7 @@ def create_benchmark(args: Args, mode: str):
                 (n_hidden_states, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
             )
             weights = torch.randn(
-                (HIDDEN_SIZE, BASE_VOCAB_SIZE), dtype=torch.bfloat16, device=device
+                (BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
             )
             return _run_benchmark(hidden_states, weights, provider)
 
