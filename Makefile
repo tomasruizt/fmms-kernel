@@ -32,3 +32,7 @@ modal-get-results-triton-bench:
 modal-persistent-matmul:
 	GPU=$(GPU) \
 	modal run -m src.fused_mm_sampling.modal_lib.modal_persistent_matmul
+
+modal-matmul-comparison:
+	GPU=$(GPU) \
+	modal run -m src.fused_mm_sampling.modal_lib.modal_matmul_comparison

@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 import triton
 
-from fused_mm_sampling import tl_matmul
+from .. import tl_matmul
 
 cublas = tl_matmul.get_cublas()
 
@@ -61,7 +61,11 @@ def benchmark(
     return ms, min_ms, max_ms
 
 
-if __name__ == "__main__":
+def matmul_comparison_main():
     out_dir = Path(__file__).parent / "profiles" / "matmul"
     out_dir.mkdir(parents=True, exist_ok=True)
     benchmark.run(show_plots=True, print_data=True, save_path=out_dir)
+
+
+if __name__ == "__main__":
+    matmul_comparison_main()
