@@ -21,13 +21,11 @@ import triton.language as tl
             },
             num_warps=num_warps,
             num_stages=num_stages,
-            maxnreg=maxnreg,
         )
         for bsz_v in [32, 4 * 32, 8 * 32]
         for bsz_d in [32, 64]
         for bsz_h in [16, 64, 128, 256]
         for num_warps in [8]  # Default 4
-        for maxnreg in [128]  # Previously 255
         for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
     ],
     key=["M", "N", "K"],
