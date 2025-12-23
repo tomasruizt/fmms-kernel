@@ -7,7 +7,7 @@ import torch
 import triton
 from pydantic_settings import BaseSettings
 
-from ..core import get_sampler, set_torch_allocator_for_tma_descriptors
+from ..core import get_gpu_name, get_sampler, set_torch_allocator_for_tma_descriptors
 
 # prevent torch._dynamo.exc.FailOnRecompileLimitHit: recompile_limit reached with fullgraph=True
 assert torch._dynamo.config.cache_size_limit == 8
@@ -153,6 +153,7 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
 
 
 def run_triton_bechmark(args: Args):
+    print("GPU:", get_gpu_name())
     print("Arguments:", args.model_dump_json())
     modes = ["batch"]  # , "vocab"]
 

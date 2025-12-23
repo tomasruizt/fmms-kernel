@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from pydantic_settings import BaseSettings
 
-from ..core import get_sampler, sample, set_torch_allocator_for_tma_descriptors
+from ..core import get_gpu_name, get_sampler, sample, set_torch_allocator_for_tma_descriptors
 
 device = torch.device("cuda")
 set_torch_allocator_for_tma_descriptors()
@@ -141,6 +141,7 @@ def benchmark_all(cases: list[Case]) -> pd.DataFrame:
 
 def run_speed_test(args: Args) -> None:
     """Run a speed test for a given set of arguments."""
+    print("GPU:", get_gpu_name())
     print("Arguments: ", args)
     if args.name is not None:
         cases = [args.as_case()]

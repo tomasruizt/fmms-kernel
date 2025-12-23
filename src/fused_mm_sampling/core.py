@@ -481,3 +481,7 @@ def flashinfer_sampling_from_logits(
     )
     result = flashinfer.sampling.sampling_from_logits(logits=logits, indices=indices)
     return result.reshape(batch_size, num_samples)
+
+
+def get_gpu_name() -> str:
+    return torch.cuda.get_device_name()
