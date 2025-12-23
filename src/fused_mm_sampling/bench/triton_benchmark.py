@@ -51,7 +51,7 @@ def create_benchmark(args: Args, mode: str):
     if args.n_hidden_states is not None:
         x_vals = [args.n_hidden_states]
     else:
-        x_vals = [1, 2, 4, 8, 16, 32, 64]  # 128, 256, 512, 1024]
+        x_vals = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 
     if args.name is not None:
         providers = [args.name]
