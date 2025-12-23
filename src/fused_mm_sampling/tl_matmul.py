@@ -34,8 +34,8 @@ import triton.language as tl
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
-    a_ptr,
-    b_ptr,
+    a_ptr,  # [M, K]
+    b_ptr,  # [N, K]
     c_ptr,
     # Matrix dimensions
     M,  # noqa: N803
@@ -46,8 +46,8 @@ def matmul_kernel(
     # by to get the element one row down (A has M rows).
     stride_am,
     stride_ak,
-    stride_bk,
     stride_bn,
+    stride_bk,
     stride_cm,
     stride_cn,
     # Meta-parameters
@@ -58,7 +58,7 @@ def matmul_kernel(
     ACTIVATION: tl.constexpr,  # noqa: N803
 ):
     """Kernel for computing the matmul C = A x B.
-    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
+    A has shape (M, K), B has shape (N, K) and C has shape (M, N)
     """
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -91,13 +91,13 @@ def matmul_kernel(
     # We will advance this pointer as we move in the K direction
     # and accumulate
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
+    # `b_ptrs` is a block of [BLOCK_SIZE_N, BLOCK_SIZE_K] pointers
     # See above `Pointer Arithmetic` section for details
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    b_ptrs = b_ptr + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -106,12 +106,14 @@ def matmul_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking the K dimension.
+        # Load the next block of A and B, generate a mask by checking M/N and K dimensions.
         # If it is out of bounds, set it to 0.
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        a_mask = (offs_am[:, None] < M) & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
+        b_mask = (offs_bn[:, None] < N) & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, accumulator)
+        accumulator = tl.dot(a, b.T, accumulator)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -138,10 +140,11 @@ def leaky_relu(x):
 
 def matmul(a, b, activation=""):
     # Check constraints.
-    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.shape[1] == b.shape[1], "Incompatible dimensions"
     assert a.is_contiguous(), "Matrix A must be contiguous"
+    assert b.is_contiguous(), "Matrix B must be contiguous"
     M, K = a.shape  # noqa: N806
-    K, N = b.shape  # noqa: N806
+    N, K = b.shape  # noqa: N806
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
 
@@ -170,3 +173,11 @@ def matmul(a, b, activation=""):
         ACTIVATION=activation,  #
     )
     return c
+
+
+def get_cublas():
+    from triton._C.libtriton import nvidia
+
+    device_workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
+    cublas = nvidia.cublas.CublasLt(device_workspace)
+    return cublas
