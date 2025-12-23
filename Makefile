@@ -30,4 +30,5 @@ modal-get-results-triton-bench:
 	cd benchmarking/modal-results/ && modal volume get fused-mm-sample triton-bench-$(GPU)
 
 modal-persistent-matmul:
+	GPU=$(GPU) \
 	modal run -m src.fused_mm_sampling.modal_lib.modal_persistent_matmul

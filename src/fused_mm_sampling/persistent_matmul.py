@@ -696,6 +696,20 @@ def torch_matmul(a, b):
     return c
 
 
+def torch_matmul_nontransposed(a, b):
+    M, K = a.shape
+    K2, N = b.shape
+    assert K == K2, "Incompatible dimensions"
+    bytes_per_elem = a.element_size()
+    flops_str = f"flops{bytes_per_elem * 8}"
+    with proton.scope(
+        f"torch-nontransposed [M={M}, N={N}, K={K}]",
+        {"bytes": bytes_per_elem * (M * K + N * K + M * N), flops_str: 2.0 * M * N * K},
+    ):
+        c = torch.matmul(a, b)
+    return c
+
+
 @contextmanager
 def proton_context():
     proton.activate(0)
@@ -718,7 +732,7 @@ def bench_fn(label, reps, warmup_reps, fn, *args):
 def bench(M, N, K, dtype, reps=100, warmup_reps=100):
     a = torch.randn((M, K), device="cuda", dtype=torch.float16).to(dtype)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16).to(dtype)
-
+    bT = b
     b = b.T.contiguous()
 
     if device_blas is not None:
@@ -726,6 +740,7 @@ def bench(M, N, K, dtype, reps=100, warmup_reps=100):
         bench_fn(blas_name, reps, warmup_reps, device_blas_matmul, a, b)
     if dtype == torch.float16:
         bench_fn("torch", reps, warmup_reps, torch_matmul, a, b)
+        bench_fn("torch-nontransposed", reps, warmup_reps, torch_matmul_nontransposed, a, bT)
     bench_fn("naive", reps, warmup_reps, matmul, a, b.T)
     bench_fn("persistent", reps, warmup_reps, matmul_persistent, a, b.T)
     warp_specialize = [False, True] if HAS_WARP_SPECIALIZE else [False]
@@ -768,10 +783,19 @@ def validate(M, N, K, dtype):
     print(f"{M=}, {N=}, {K=}, verification naive vs: ")
     a = torch.randn((M, K), device="cuda", dtype=torch.float16).to(dtype)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16).to(dtype)
+    bT = b
     b = b.T.contiguous()
 
     naive_result = matmul(a, b.T).to(torch.float16)
     run_test(naive_result, torch_matmul, a, b, "Torch", enabled=dtype == torch.float16)
+    run_test(
+        naive_result,
+        torch_matmul_nontransposed,
+        a,
+        bT,
+        "Torch (Non-Transposed)",
+        enabled=dtype == torch.float16,
+    )
     run_test(
         naive_result, device_blas_matmul, a, b, device_blas_name(), enabled=device_blas is not None
     )
