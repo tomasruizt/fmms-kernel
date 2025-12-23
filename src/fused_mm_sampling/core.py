@@ -80,7 +80,7 @@ def cdiv(n: int, div: int) -> int:
     return (n + div - 1) // div
 
 
-MIN_BLOCK_SIZE_V = 32
+MIN_BLOCK_SIZE_V = 128
 
 
 # @torch.compile(fullgraph=True)
@@ -184,7 +184,7 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
             num_stages=num_stages,
             maxnreg=maxnreg,
         )
-        for bsz_v in [MIN_BLOCK_SIZE_V, 4 * MIN_BLOCK_SIZE_V, 8 * MIN_BLOCK_SIZE_V]
+        for bsz_v in [MIN_BLOCK_SIZE_V, 2 * MIN_BLOCK_SIZE_V]
         for bsz_d in [32, 64]
         for bsz_h in [16, 64, 128, 256]
         for num_warps in [8]  # Default 4
