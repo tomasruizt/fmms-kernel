@@ -13,6 +13,7 @@ def make_image():
         "pydantic-settings",
         "matplotlib",
         "nvtx",
+        "llnl-hatchet",
     ]
     return img.uv_pip_install(deps)
 
