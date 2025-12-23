@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -41,15 +43,6 @@ def matmul_kernel(
     M,  # noqa: N803
     N,  # noqa: N803
     K,  # noqa: N803
-    # The stride variables represent how much to increase the ptr by when moving by 1
-    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
-    # by to get the element one row down (A has M rows).
-    stride_am,
-    stride_ak,
-    stride_bn,
-    stride_bk,
-    stride_cm,
-    stride_cn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_N: tl.constexpr,  # noqa: N803
@@ -58,8 +51,33 @@ def matmul_kernel(
     ACTIVATION: tl.constexpr,  # noqa: N803
 ):
     """Kernel for computing the matmul C = A x B.
-    A has shape (M, K), B has shape (N, K) and C has shape (M, N)
+    A has shape (M, K), B has shape (N, K) and C has shape (M, N).
+    Uses device-side tensor descriptors (TMA) for efficient memory access.
     """
+    # -----------------------------------------------------------
+    # Create device-side tensor descriptors for TMA
+    # A: [M, K] row-major contiguous
+    # B: [N, K] row-major contiguous (transposed for A @ B.T)
+    # C: [M, N] row-major contiguous
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+    )
+    b_desc = tl.make_tensor_descriptor(
+        b_ptr,
+        shape=[N, K],
+        strides=[K, 1],
+        block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+    )
+    c_desc = tl.make_tensor_descriptor(
+        c_ptr,
+        shape=[M, N],
+        strides=[N, 1],
+        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
+    )
+
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # Process N dimension first, then M (matching fused kernel pattern).
@@ -73,31 +91,9 @@ def matmul_kernel(
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     pid_n, pid_m = tl.swizzle2d(pid_n, pid_m, num_pid_n, num_pid_m, GROUP_SIZE_M)
 
-    # -----------------------------------------------------------
-    # Add some integer bound assumptions.
-    # This helps to guide integer analysis in the backend to optimize
-    # load/store offset address calculation
-    tl.assume(pid_m >= 0)
-    tl.assume(pid_n >= 0)
-    tl.assume(stride_am > 0)
-    tl.assume(stride_ak > 0)
-    tl.assume(stride_bn > 0)
-    tl.assume(stride_bk > 0)
-    tl.assume(stride_cm > 0)
-    tl.assume(stride_cn > 0)
-
-    # ----------------------------------------------------------
-    # Create pointers for the first blocks of A and B.
-    # We will advance this pointer as we move in the K direction
-    # and accumulate
-    # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
-    # `b_ptrs` is a block of [BLOCK_SIZE_N, BLOCK_SIZE_K] pointers
-    # See above `Pointer Arithmetic` section for details
-    offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_bn[:, None] * stride_bn + offs_k[None, :] * stride_bk)
+    # Block starting offsets
+    offs_am = pid_m * BLOCK_SIZE_M
+    offs_bn = pid_n * BLOCK_SIZE_N
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -106,17 +102,13 @@ def matmul_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        # Load the next block of A and B, generate a mask by checking M/N and K dimensions.
-        # If it is out of bounds, set it to 0.
-        a_mask = (offs_am[:, None] < M) & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
-        b_mask = (offs_bn[:, None] < N) & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
-        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        offs_k = k * BLOCK_SIZE_K
+        # Load blocks using tensor descriptors (TMA handles bounds automatically)
+        a = a_desc.load([offs_am, offs_k])
+        b = b_desc.load([offs_bn, offs_k])
         # We accumulate along the K dimension.
         accumulator = tl.dot(a, b.T, accumulator)
-        # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     if ACTIVATION == "leaky_relu":
@@ -124,12 +116,10 @@ def matmul_kernel(
     c = accumulator.to(tl.bfloat16)
 
     # -----------------------------------------------------------
-    # Write back the block of the output matrix C with masks.
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, c, mask=c_mask)
+    # Write back the block of the output matrix C using tensor descriptor
+    offs_cm = pid_m * BLOCK_SIZE_M
+    offs_cn = pid_n * BLOCK_SIZE_N
+    c_desc.store([offs_cm, offs_cn], c)
 
 
 # We can fuse `leaky_relu` by providing it as an `ACTIVATION` meta-parameter in `matmul_kernel`.
@@ -148,6 +138,12 @@ def matmul(a, b, activation=""):
     # Allocates output.
     c = torch.empty((M, N), device=a.device, dtype=torch.bfloat16)
 
+    # TMA descriptors require a global memory allocation
+    def alloc_fn(size: int, alignment: int, stream: Optional[int]):
+        return torch.empty(size, device="cuda", dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
+
     # 2D launch kernel with N first to match fused kernel pattern.
     # This enables processing many N blocks for the same M block,
     # allowing A matrix (small M dimension) to be reused from L2 cache.
@@ -164,12 +160,6 @@ def matmul(a, b, activation=""):
         M,  # noqa: N803
         N,  # noqa: N803
         K,  # noqa: N803
-        a.stride(0),
-        a.stride(1),  #
-        b.stride(0),
-        b.stride(1),  #
-        c.stride(0),
-        c.stride(1),  #
         ACTIVATION=activation,  #
     )
     return c
