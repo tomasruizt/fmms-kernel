@@ -1,7 +1,7 @@
-#GPU := h100
-#GPU := a100-80gb
 GPU := b200
-TRITON_BENCH_DIR = benchmarking/modal-results/triton-bench-$(GPU)
+POSTFIX := 
+VOLUME_DIR_NAME := triton-bench-$(GPU)$(POSTFIX)
+TRITON_BENCH_DIR := benchmarking/modal-results/$(VOLUME_DIR_NAME)
 
 modal-speed-test:
 	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test
@@ -10,7 +10,7 @@ modal-triton-benchmark: modal-create-results-triton-bench modal-get-results-trit
 
 modal-create-results-triton-bench:
 	mkdir -p $(TRITON_BENCH_DIR)
-	GPU=$(GPU) TGT_DIR="/vol-fused-mm-sample/triton-bench-$(GPU)" \
+	GPU=$(GPU) TGT_DIR="/vol-fused-mm-sample/$(VOLUME_DIR_NAME)" \
 	modal run \
 		-m src.fused_mm_sampling.modal_lib.modal_triton_benchmark \
 		> $(TRITON_BENCH_DIR)/logs.txt
@@ -27,7 +27,7 @@ modal-get-results-speed-test:
 
 modal-get-results-triton-bench:
 	mkdir -p benchmarking/modal-results/
-	cd benchmarking/modal-results/ && modal volume get fused-mm-sample triton-bench-$(GPU)
+	cd benchmarking/modal-results/ && modal volume get fused-mm-sample $(VOLUME_DIR_NAME)
 
 modal-persistent-matmul:
 	GPU=$(GPU) \
