@@ -97,6 +97,8 @@ def fused_mm_sample_triton(
             f"hidden_states second dimension ({D2}) must match weights second dimension ({D})"
         )
 
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count  # noqa: N806
+
     max_grid_size_v = triton.cdiv(V, MIN_BLOCK_SIZE_V)
     maxs = torch.empty(
         (num_samples, max_grid_size_v, H),
@@ -109,11 +111,11 @@ def fused_mm_sample_triton(
 
     def grid(meta):
         grid_size_v = triton.cdiv(V, meta["BLOCK_SIZE_V"])
+        grid_size_h = triton.cdiv(H, meta["BLOCK_SIZE_H"])
         grid_size["v"] = grid_size_v
-        return (
-            grid_size_v,
-            triton.cdiv(H, meta["BLOCK_SIZE_H"]),
-        )
+        num_tiles = grid_size_v * grid_size_h
+        # Persistent kernel: launch min(NUM_SMS, num_tiles) programs
+        return (min(NUM_SMS, num_tiles),)
 
     fused_mm_sample_triton_kernel[grid](
         weights_ptr=weights,
@@ -128,6 +130,7 @@ def fused_mm_sample_triton(
         seed=seed,
         max_grid_size_v=max_grid_size_v,
         WARP_SPECIALIZE=supports_warp_specialization(),
+        NUM_SMS=NUM_SMS,
     )
 
     # 2nd stage: reduction
@@ -178,6 +181,17 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
     return True
 
 
+@triton.jit
+def _compute_tile_pid(tile_id, num_pid_in_group, num_pid_v, GROUP_SIZE_V):  # noqa: N803
+    """Compute pid_v, pid_h from tile_id using grouped ordering for L2 cache efficiency."""
+    group_id = tile_id // num_pid_in_group
+    first_pid_v = group_id * GROUP_SIZE_V
+    group_size_v = tl.minimum(num_pid_v - first_pid_v, GROUP_SIZE_V)
+    pid_v = first_pid_v + (tile_id % group_size_v)
+    pid_h = (tile_id % num_pid_in_group) // group_size_v
+    return pid_v, pid_h
+
+
 @triton.autotune(
     configs=[
         triton.Config(
@@ -218,25 +232,20 @@ def fused_mm_sample_triton_kernel(
     GROUP_SIZE_V: tl.constexpr,  # noqa: N803
     max_grid_size_v: tl.constexpr,
     WARP_SPECIALIZE: tl.constexpr,  # noqa: N803
+    NUM_SMS: tl.constexpr,  # noqa: N803
 ):
-    # Compute a different program ordering to exploit L2 cache, as suggested in
-    # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
-    pid_v = tl.program_id(axis=0)
-    pid_h = tl.program_id(axis=1)
+    """Persistent kernel for fused matmul + Gumbel-max sampling.
+
+    Each SM processes multiple tiles in a loop, staying persistent on the SM
+    rather than exiting after processing a single tile.
+    """
+    start_pid = tl.program_id(axis=0)
     num_pid_v = tl.cdiv(vocab_size, BLOCK_SIZE_V)
     num_pid_h = tl.cdiv(n_hidden_states, BLOCK_SIZE_H)
-    pid_v, pid_h = tl.swizzle2d(pid_v, pid_h, num_pid_v, num_pid_h, GROUP_SIZE_V)
-    v_start = pid_v * BLOCK_SIZE_V
-    h_start = pid_h * BLOCK_SIZE_H
+    num_tiles = num_pid_v * num_pid_h
+    num_pid_in_group = GROUP_SIZE_V * num_pid_h
 
-    # We don't instantiate gumbel_max yet, because each program just writes
-    # its local max into main memory for a parallel reduction in stage 2.
-
-    offsets_v = v_start + tl.arange(0, BLOCK_SIZE_V)
-    mask_v = offsets_v < vocab_size
-
-    logits_blk = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_H), dtype=tl.float32)
-
+    # Create tensor descriptors outside the tile loop (they describe full tensors)
     w_desc = tl.make_tensor_descriptor(
         weights_ptr,
         shape=[vocab_size, hidden_size],
@@ -261,49 +270,75 @@ def fused_mm_sample_triton_kernel(
         strides=[max_grid_size_v * n_hidden_states, n_hidden_states, 1],
         block_shape=[1, 1, BLOCK_SIZE_H],
     )
-    # Compute a block of logits logits_blk
-    for d_start in range(0, hidden_size, BLOCK_SIZE_D, warp_specialize=WARP_SPECIALIZE):
-        # load weights tile [BLOCK_SIZE_V, BLOCK_SIZE_D]
-        w_blk = w_desc.load([v_start, d_start])
-        # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
-        hidden_states_blk = hidden_states_desc.load([h_start, d_start])
-        logits_blk = tl.dot(w_blk, hidden_states_blk.T, acc=logits_blk)
 
-    # Later we will take max over logits + noise, but rows outside the mask
-    # should not be considered. Setting them to -inf achieves this.
-    logits_blk = tl.where(mask_v[:, None], logits_blk, -float("inf"))
-    logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
+    # tile_id_c is used in the epilogue to break the dependency between
+    # the prologue and the epilogue (workaround for Blackwell pipelining bug)
+    tile_id_c = start_pid - NUM_SMS
 
-    for sample_idx in range(num_samples):
-        # Note: Creating appropriately sized tensors is tricky because
-        # tl.arange() only accepts tl.constexpr that are powers of 2.
-        noise_size: tl.constexpr = BLOCK_SIZE_V * BLOCK_SIZE_H
-        noise_offsets = tl.arange(0, noise_size).reshape((BLOCK_SIZE_V, BLOCK_SIZE_H))
-        # Note: Each tile (v, h) and batch of samples needs a different seed,
-        # otherwise they all create the same noise, leading to sampling artifacts.
-        # Compute gumbel noise directly to reduce register pressure
-        gumbel_noise = -tl.log(
-            -tl.log(
-                tl.rand(
-                    seed + pid_v * 100 + pid_h * 1_000 + sample_idx * 10_000,
-                    noise_offsets,
+    # Persistent loop: each SM processes multiple tiles
+    for tile_id in tl.range(
+        start_pid, num_tiles, NUM_SMS, flatten=True, warp_specialize=WARP_SPECIALIZE
+    ):
+        # Compute pid_v, pid_h from tile_id using grouped ordering for L2 cache
+        pid_v, pid_h = _compute_tile_pid(tile_id, num_pid_in_group, num_pid_v, GROUP_SIZE_V)
+
+        v_start = pid_v * BLOCK_SIZE_V
+        h_start = pid_h * BLOCK_SIZE_H
+
+        offsets_v = v_start + tl.arange(0, BLOCK_SIZE_V)
+        mask_v = offsets_v < vocab_size
+
+        logits_blk = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_H), dtype=tl.float32)
+
+        # Compute a block of logits logits_blk
+        for d_start in range(0, hidden_size, BLOCK_SIZE_D):
+            # load weights tile [BLOCK_SIZE_V, BLOCK_SIZE_D]
+            w_blk = w_desc.load([v_start, d_start])
+            # load hidden_states tile [BLOCK_SIZE_H, BLOCK_SIZE_D]
+            hidden_states_blk = hidden_states_desc.load([h_start, d_start])
+            logits_blk = tl.dot(w_blk, hidden_states_blk.T, acc=logits_blk)
+
+        # Later we will take max over logits + noise, but rows outside the mask
+        # should not be considered. Setting them to -inf achieves this.
+        logits_blk = tl.where(mask_v[:, None], logits_blk, -float("inf"))
+        logits_blk = logits_blk / temperature  # [Vblk, n_hidden_states]
+
+        # Epilogue: use tile_id_c to break dependency with prologue
+        tile_id_c += NUM_SMS
+        pid_v_c, pid_h_c = _compute_tile_pid(tile_id_c, num_pid_in_group, num_pid_v, GROUP_SIZE_V)
+        v_start_c = pid_v_c * BLOCK_SIZE_V
+        h_start_c = pid_h_c * BLOCK_SIZE_H
+
+        for sample_idx in range(num_samples):
+            # Note: Creating appropriately sized tensors is tricky because
+            # tl.arange() only accepts tl.constexpr that are powers of 2.
+            noise_size: tl.constexpr = BLOCK_SIZE_V * BLOCK_SIZE_H
+            noise_offsets = tl.arange(0, noise_size).reshape((BLOCK_SIZE_V, BLOCK_SIZE_H))
+            # Note: Each tile (v, h) and batch of samples needs a different seed,
+            # otherwise they all create the same noise, leading to sampling artifacts.
+            # Compute gumbel noise directly to reduce register pressure
+            gumbel_noise = -tl.log(
+                -tl.log(
+                    tl.rand(
+                        seed + pid_v_c * 100 + pid_h_c * 1_000 + sample_idx * 10_000,
+                        noise_offsets,
+                    )
                 )
             )
-        )
 
-        gumbel_max, gumbel_max_idx_local = tl.max(
-            logits_blk + gumbel_noise, axis=0, return_indices=True
-        )
-        gumbel_max_idx_global = gumbel_max_idx_local + v_start
+            gumbel_max, gumbel_max_idx_local = tl.max(
+                logits_blk + gumbel_noise, axis=0, return_indices=True
+            )
+            gumbel_max_idx_global = gumbel_max_idx_local + v_start_c
 
-        max_desc.store(
-            [sample_idx, pid_v, pid_h * BLOCK_SIZE_H],
-            gumbel_max[None, None, :],
-        )
-        max_idx_desc.store(
-            [sample_idx, pid_v, pid_h * BLOCK_SIZE_H],
-            gumbel_max_idx_global[None, None, :],
-        )
+            max_desc.store(
+                [sample_idx, pid_v_c, h_start_c],
+                gumbel_max[None, None, :],
+            )
+            max_idx_desc.store(
+                [sample_idx, pid_v_c, h_start_c],
+                gumbel_max_idx_global[None, None, :],
+            )
 
 
 def set_torch_allocator_for_tma_descriptors():
