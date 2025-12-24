@@ -185,11 +185,11 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
             maxnreg=maxnreg,
         )
         for bsz_v in [MIN_BLOCK_SIZE_V, 2 * MIN_BLOCK_SIZE_V]
-        for bsz_d in [32, 64]
+        for bsz_d in [64, 128]
         for bsz_h in [16, 64, 128, 256]
         for num_warps in [8]  # Default 4
-        for maxnreg in [128]  # Previously 255
-        for num_stages in [3]  # Higher values increase SRAM requirements, but 4 outperfomed 2.
+        for maxnreg in [128]  # Previously 255, not sure either is better
+        for num_stages in [4]  # 4 outpeforms 2, and 3
         if is_config_valid(bsz_v, bsz_d, bsz_h)
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
