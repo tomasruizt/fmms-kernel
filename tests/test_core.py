@@ -1,8 +1,9 @@
 from pathlib import Path
 
+import pytest
 import torch
 
-from fused_mm_sampling.core import JLSampler
+from fused_mm_sampling.core import JLSampler, bsz_h
 
 device = torch.device("cuda")
 
@@ -21,3 +22,21 @@ def test_jl_sampling_aproximate_correctness():
 
     print(f"{weights.shape=}")
     print(f"{hidden_states.shape=}")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        # H, expected BSZ_H
+        (1, 16),
+        (16, 16),
+        (17, 32),
+        (32, 32),
+        (33, 64),
+        (64, 64),
+        (65, 64),
+    ],
+)
+def test_bsz_h(args):
+    h, expected_bsz_h = args
+    assert bsz_h(h) == expected_bsz_h
