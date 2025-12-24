@@ -34,9 +34,7 @@ def test_jl_sampling_aproximate_correctness():
         (32, 32),
         (33, 64),
         (64, 64),
-        (65, 128),
-        (128, 128),
-        (129, 128),
+        (65, 64),
     ],
 )
 def test_bsz_h(args):

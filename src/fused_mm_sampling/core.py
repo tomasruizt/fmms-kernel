@@ -176,7 +176,6 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
             {
                 "BLOCK_SIZE_V": bsz_v,
                 "BLOCK_SIZE_D": bsz_d,
-                "BLOCK_SIZE_H": bsz_h,
                 "GROUP_SIZE_V": 4,
                 "BLOCK_SIZE_NSAMPLES": 1,
             },
@@ -186,15 +185,14 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
         )
         for bsz_v in [MIN_BLOCK_SIZE_V, 2 * MIN_BLOCK_SIZE_V]
         for bsz_d in [64, 128]
-        for bsz_h in [16, 64, 128, 256]
         for num_warps in [8]  # Default 4
         for maxnreg in [128]  # Previously 255, not sure either is better
         for num_stages in [4]  # 4 outpeforms 2, and 3
-        if is_config_valid(bsz_v, bsz_d, bsz_h)
     ],
     key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
     cache_results=True,
 )
+@triton.heuristics(values={"BLOCK_SIZE_H": lambda args: bsz_h(args["n_hidden_states"])})
 @triton.jit
 def fused_mm_sample_triton_kernel(
     weights_ptr,  # [V, D]
@@ -485,6 +483,4 @@ def bsz_h(H: int) -> int:  # noqa: N803
         return 16
     elif H <= 32:
         return 32
-    elif H <= 64:
-        return 64
-    return 128
+    return 64
