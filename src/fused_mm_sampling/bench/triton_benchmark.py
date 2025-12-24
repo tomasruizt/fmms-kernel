@@ -7,11 +7,13 @@ import torch
 import triton
 from pydantic_settings import BaseSettings
 
-from ..core import get_gpu_name, get_sampler
+from ..core import get_gpu_name, get_sampler, set_torch_allocator_for_tma_descriptors
 
 # prevent torch._dynamo.exc.FailOnRecompileLimitHit: recompile_limit reached with fullgraph=True
 assert torch._dynamo.config.cache_size_limit == 8
 torch._dynamo.config.cache_size_limit = 1_000
+
+set_torch_allocator_for_tma_descriptors()
 
 device = torch.device("cuda")
 

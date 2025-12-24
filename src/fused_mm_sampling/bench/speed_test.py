@@ -6,9 +6,10 @@ import pandas as pd
 import torch
 from pydantic_settings import BaseSettings
 
-from ..core import get_gpu_name, get_sampler, sample
+from ..core import get_gpu_name, get_sampler, sample, set_torch_allocator_for_tma_descriptors
 
 device = torch.device("cuda")
+set_torch_allocator_for_tma_descriptors()
 
 
 class Args(BaseSettings):
