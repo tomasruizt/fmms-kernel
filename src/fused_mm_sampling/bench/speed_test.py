@@ -72,8 +72,9 @@ class Case:
 all_providers = [
     "fused-triton",
     "naive-compiled",
-    "naive-tl-matmul",
-    "jl-compiled",
+    # "sequential-compiled",
+    # "naive-tl-matmul",
+    # "jl-compiled",
     "flashinfer:top_k_top_p_sampling_from_logits",
     "flashinfer:sampling_from_logits",
 ]

@@ -34,6 +34,7 @@ class CliArgs(Args, cli_parse_args=True):
 provider_names = {
     "fused-triton": "Fused Matmul-Sampling",
     "naive-compiled": "Naive PyTorch Compiled",
+    # "sequential-compiled": "Sequential PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",
     # "jl-compiled": "JL Compiled",
     "flashinfer:top_k_top_p_sampling_from_logits": "flashinfer:top_k_top_p_sampling_from_logits",

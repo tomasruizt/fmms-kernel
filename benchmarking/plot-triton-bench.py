@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 
 
 def plot_batch_scaling(bdf_long: pd.DataFrame):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
 
     sns.lineplot(bdf_long, x="n_hidden_states", y="time[ms]", hue="provider", marker="o", ax=ax1)
     ax1.set_xscale("log")
@@ -17,7 +17,7 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax1.grid(alpha=0.5)
     ax1.set_xlabel("Inference batch size")
     ax1.set_ylabel("Time (ms)")
-    sns.move_legend(ax1, "upper center", title="Method", bbox_to_anchor=(0.5, 1.3), ncol=2)
+    ax1.legend_.remove()
 
     sns.lineplot(bdf_long, x="n_hidden_states", y="samples/ms", hue="provider", marker="o", ax=ax2)
     ax2.set_xscale("log")
@@ -25,7 +25,10 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax2.grid(alpha=0.5)
     ax2.set_xlabel("Inference batch size")
     ax2.set_ylabel("Samples/ms")
-    sns.move_legend(ax2, "upper center", title="Method", bbox_to_anchor=(0.5, 1.3), ncol=2)
+
+    ncol = 1
+    bbox_to_anchor = (1.05, 1)
+    sns.move_legend(ax2, "upper left", title="Method", bbox_to_anchor=bbox_to_anchor, ncol=ncol)
 
     fig.tight_layout()
     return ax1

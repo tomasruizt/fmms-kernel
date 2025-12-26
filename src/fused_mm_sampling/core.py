@@ -42,7 +42,7 @@ sample_compiled = torch.compile(sample)
 
 @nvtx.annotate()
 @torch.compile(fullgraph=True)
-def incremental_sample_pt(
+def sequential_sample_pt(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
@@ -55,7 +55,7 @@ def incremental_sample_pt(
         raise ValueError(
             f"hidden_states second dimension ({D2}) must match weights first dimension ({D})"
         )
-    block_size = 128
+    block_size = 8192
     # compute logits blocks
     gumbel_max = torch.full((num_samples, H), float("-inf"), device=device)
     gumbel_max_idx = torch.empty(size=(num_samples, H), dtype=torch.long, device=device)
@@ -403,6 +403,8 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
             return SimpleSampler(sample)
         case "naive-compiled":
             return SimpleSampler(sample_compiled)
+        case "sequential-compiled":
+            return SimpleSampler(sequential_sample_pt)
         case "naive-tl-matmul":
             return SimpleSampler(lambda **kwargs: sample(**kwargs, tl_matmul=True))
         case "jl-compiled":
