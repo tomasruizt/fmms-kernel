@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+import triton
+import triton.profiler as proton
 from pydantic_settings import BaseSettings
 
-from ..core import get_gpu_name, get_sampler, sample
+from ..core import fused_mm_sample_triton_kernel, get_gpu_name, get_sampler, sample
 
 device = torch.device("cuda")
 
@@ -19,6 +21,7 @@ class Args(BaseSettings):
     n_hidden_states: int = 256
     n_samples: int = 1
     tgt_dir: Path | None = None
+    use_proton: bool = False
 
     def as_case(self, name: str | None = None) -> "Case":
         if name is None:
@@ -31,6 +34,7 @@ class Args(BaseSettings):
             n_runs_warmup=self.n_runs_warmup,
             n_hidden_states=self.n_hidden_states,
             n_samples=self.n_samples,
+            use_proton=self.use_proton,
         )
 
     def all_cases(self) -> list["Case"]:
@@ -53,9 +57,9 @@ class Case:
     name: str
     n_runs_benchmark: int
     n_runs_warmup: int
-
     n_hidden_states: int
     n_samples: int
+    use_proton: bool
 
     def make_fn_kwargs(self) -> dict:
         """This function can be slow because it allocates tensors."""
@@ -80,10 +84,31 @@ all_providers = [
 ]
 
 
+def setup_proton() -> None:
+    # Start proton BEFORE kernel compilation so hook="triton" can instrument the JIT
+    print("⚙️ Proton profiling enabled")
+    proton.start(name="kernel", hook="triton", backend="cupti", mode="pcsampling")
+
+    def enter_autotune(args, reset_only=False):
+        if reset_only:
+            return
+        proton.enter_scope("<autotune>")
+
+    def exit_autotune(args, exception):
+        proton.exit_scope()
+
+    fused_mm_sample_triton_kernel.pre_hook = enter_autotune
+    fused_mm_sample_triton_kernel.post_hook = exit_autotune
+
+
+@proton.scope("clear-l2-cache")
+def clear_l2_cache(cache):
+    with torch.cuda.nvtx.range("clear-l2-cache"):
+        triton.runtime.driver.active.clear_cache(cache)
+
+
 def benchmark(case: Case) -> pd.DataFrame:
     """Inspired by triton.testing.do_bench"""
-    import triton  # defer import for Modal compatibility
-
     print("=" * 80)
     print(f"Benchmarking {case.name}...")
     kwargs = case.make_fn_kwargs()
@@ -95,32 +120,40 @@ def benchmark(case: Case) -> pd.DataFrame:
 
     di = triton.runtime.driver.active.get_device_interface()
 
-    # Compile, etc.
-    fn()
-    di.synchronize()
+    if case.use_proton:
+        setup_proton()
+
+    with proton.scope("first-run"):
+        # Compile, etc.
+        fn()
+        di.synchronize()
 
     cache = triton.runtime.driver.active.get_empty_cache_for_benchmark()
-
-    def clear_l2_cache():
-        with torch.cuda.nvtx.range("clear-l2-cache"):
-            triton.runtime.driver.active.clear_cache(cache)
 
     start_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
     end_events = [di.Event(enable_timing=True) for _ in range(case.n_runs_benchmark)]
 
     print("Warming up...")
-    for _ in range(case.n_runs_warmup):
-        clear_l2_cache()
-        fn()
+    with proton.scope("warmup"):
+        for _ in range(case.n_runs_warmup):
+            clear_l2_cache(cache)
+            fn()
 
     print("Timing...")
-    for _, start_event, end_event in zip(range(case.n_runs_benchmark), start_events, end_events):
-        clear_l2_cache()
-        with torch.cuda.nvtx.range("kernel"):
-            start_event.record()
-            timeit.timeit(fn, number=1)
-            end_event.record()
-        di.synchronize()
+    with proton.scope("timing"):
+        for _, start_event, end_event in zip(
+            range(case.n_runs_benchmark), start_events, end_events
+        ):
+            clear_l2_cache(cache)
+            with torch.cuda.nvtx.range("kernel"):
+                start_event.record()
+                timeit.timeit(fn, number=1)
+                end_event.record()
+            di.synchronize()
+
+    if case.use_proton:
+        proton.finalize()
+
     times_ms = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
 
     results = {

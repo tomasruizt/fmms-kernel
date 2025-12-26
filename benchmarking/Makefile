@@ -21,6 +21,7 @@ N_RUNS_BENCHMARK=1
 SUDO=sudo
 NSIGHT_RESULTS_DIR=profiles/nsight
 NCU_RESULTS_DIR=profiles/ncu
+PROTON_RESULTS_DIR=profiles/proton
 
 # NCU profiling targets:
 # --import-source yes: Embeds source code into the .ncu-rep file, allowing it to be
@@ -132,3 +133,10 @@ ncu-comparison:
 	make ncu-profile-flashinfer N_HIDDEN_STATES=256 NCU_RESULTS_DIR=profiles/ncu-bsz256
 	make ncu-profile-fused-triton N_HIDDEN_STATES=1 NCU_RESULTS_DIR=profiles/ncu-bsz1
 	make ncu-profile-flashinfer N_HIDDEN_STATES=1 NCU_RESULTS_DIR=profiles/ncu-bsz1
+
+proton-profile-fused-triton:
+	rm -rf $(PROTON_RESULTS_DIR)
+	mkdir -p $(PROTON_RESULTS_DIR)
+	$(PYTHON) ./speed_test.py --n_hidden_states=1 --use_proton=True --name=fused-triton --n_runs_benchmark=10 --n_runs_warmup=0
+	proton-viewer -m num_samples/%,time/s kernel.hatchet -i timing > $(PROTON_RESULTS_DIR)/kernel-by-line.txt
+	mv kernel.hatchet $(PROTON_RESULTS_DIR)/kernel.hatchet

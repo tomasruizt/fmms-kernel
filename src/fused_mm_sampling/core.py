@@ -3,7 +3,7 @@
 # os.environ["TRITON_INTERPRET"] = "1"
 import math
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, NamedTuple, Protocol
 
 import flashinfer
 import nvtx
@@ -172,6 +172,31 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
     return True
 
 
+def metadata_fn(
+    grid: tuple,
+    metadata: NamedTuple,
+    args: dict,
+):
+    """Copied from https://github.com/triton-lang/triton/blob/main/third_party/proton/tutorials/matmul.py"""
+    grid_x, grid_y, grid_z = unpack_grid(grid)
+    num_warps = metadata.num_warps
+    num_stages = metadata.num_stages
+    cluster_x, cluster_y, cluster_z = unpack_grid((metadata.num_ctas,))
+    shared_memory = metadata.shared
+    return {
+        "name": f"fused_mm_sample_triton_<grid:{grid_x}x{grid_y}x{grid_z}>_<cluster:{cluster_x}x{cluster_y}x{cluster_z}>_<warps:{num_warps}>_<shared:{shared_memory}>_<stages:{num_stages}>",
+    }
+
+
+def unpack_grid(grid):
+    if len(grid) == 1:
+        return grid[0], 1, 1
+    if len(grid) == 2:
+        return grid[0], grid[1], 1
+    if len(grid) == 3:
+        return grid[0], grid[1], grid[2]
+
+
 @triton.autotune(
     configs=[
         triton.Config(
@@ -195,7 +220,7 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
     cache_results=True,
 )
 @triton.heuristics(values={"BLOCK_SIZE_H": lambda args: bsz_h(args["n_hidden_states"])})
-@triton.jit
+@triton.jit(launch_metadata=metadata_fn)
 def fused_mm_sample_triton_kernel(
     weights_ptr,  # [V, D]
     hidden_states_ptr,  # [n_hidden_states, D]
