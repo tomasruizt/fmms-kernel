@@ -15,10 +15,19 @@ torch._dynamo.config.cache_size_limit = 1_000
 
 device = torch.device("cuda")
 
-BASE_VOCAB_SIZE = 256000
+# LLama-3.3-70B: https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct/blob/main/config.json
+BASE_VOCAB_SIZE = 128256
 HIDDEN_SIZE = 8192
 N_SAMPLES = 1
 TEMPERATURE = 1.0
+
+# Qwen3-0.6B: https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json
+# BASE_VOCAB_SIZE = 151936
+# HIDDEN_SIZE = 1024
+
+# SmolLM2-135M: https://huggingface.co/HuggingFaceTB/SmolLM2-135M/blob/main/config.json
+# BASE_VOCAB_SIZE = 49152
+# HIDDEN_SIZE = 576
 
 
 class Args(BaseSettings):
@@ -33,6 +42,7 @@ class CliArgs(Args, cli_parse_args=True):
 
 provider_names = {
     "fused-triton": "Fused Matmul-Sampling",
+    "fused-triton-no-gumbel": "Fused Matmul-Sampling-No-Noise",
     "naive-compiled": "Naive PyTorch Compiled",
     # "sequential-compiled": "Sequential PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",

@@ -91,6 +91,7 @@ def fused_mm_sample_triton(
     num_samples: int,
     temperature: float,
     seed: int,
+    GUMBEL: bool = True,  # noqa: N803
 ):
     V, D = weights.shape  # noqa: N806
     H, D2 = hidden_states.shape  # noqa: N806
@@ -128,6 +129,7 @@ def fused_mm_sample_triton(
         num_samples=num_samples,
         temperature=temperature,
         seed=seed,
+        GUMBEL=GUMBEL,
     )
 
     # 2nd stage: reduction
@@ -189,7 +191,7 @@ def is_config_valid(bsz_v, bsz_d, bsz_h):
         for maxnreg in [128]  # Previously 255, not sure either is better
         for num_stages in [4]  # 4 outpeforms 2, and 3
     ],
-    key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples"],
+    key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples", "GUMBEL"],
     cache_results=True,
 )
 @triton.heuristics(values={"BLOCK_SIZE_H": lambda args: bsz_h(args["n_hidden_states"])})
@@ -210,6 +212,7 @@ def fused_mm_sample_triton_kernel(
     BLOCK_SIZE_H: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_NSAMPLES: tl.constexpr,  # noqa: N803
     GROUP_SIZE_V: tl.constexpr,  # noqa: N803
+    GUMBEL: tl.constexpr,  # noqa: N803
 ):
     # Compute a different program ordering to exploit L2 cache, as suggested in
     # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
@@ -272,18 +275,19 @@ def fused_mm_sample_triton_kernel(
         # Note: Each tile (v, h) and batch of samples needs a different seed,
         # otherwise they all create the same noise, leading to sampling artifacts.
         # Compute gumbel noise directly to reduce register pressure
-        gumbel_noise = -tl.log(
-            -tl.log(
-                tl.rand(
-                    seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
-                    noise_offsets,
+        if GUMBEL:
+            logits_plus_noise = logits_blk + tl.log(
+                -tl.log(
+                    tl.rand(
+                        seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
+                        noise_offsets,
+                    )
                 )
             )
-        )
+        else:
+            logits_plus_noise = logits_blk[None, :, :]
 
-        gumbel_max, gumbel_max_idx_local = tl.max(
-            logits_blk + gumbel_noise, axis=1, return_indices=True
-        )
+        gumbel_max, gumbel_max_idx_local = tl.max(logits_plus_noise, axis=1, return_indices=True)
         gumbel_max_idx_global = gumbel_max_idx_local + v_start
 
         # Output offset for this batch
@@ -399,6 +403,10 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
     match provider:
         case "fused-triton":
             return SimpleSampler(lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0))
+        case "fused-triton-no-gumbel":
+            return SimpleSampler(
+                lambda **kwargs: fused_mm_sample_triton(**kwargs, seed=0, GUMBEL=False)
+            )
         case "naive-pt":
             return SimpleSampler(sample)
         case "naive-compiled":
