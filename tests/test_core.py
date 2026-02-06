@@ -4,7 +4,7 @@ import pytest
 import torch
 from scipy.stats import chisquare
 
-from fused_mm_sampling.core import JLSampler, bsz_h, fused_mm_sample_triton
+from fused_mm_sampling.core import JLSampler, bsz_h, get_sampler
 from fused_mm_sampling.testing import make_synthetic_inputs
 
 device = torch.device("cuda")
@@ -44,8 +44,19 @@ def test_bsz_h(args):
     assert bsz_h(h) == expected_bsz_h
 
 
-def test_fused_triton_sampling_distribution():
-    """Verify that the fused Triton kernel samples from the correct distribution.
+@pytest.mark.parametrize(
+    "provider",
+    [
+        "fused-triton",
+        "naive-pt",
+        "naive-compiled",
+        "sequential-compiled",
+        "flashinfer:sampling_from_logits",
+        "flashinfer:top_k_top_p_sampling_from_logits",
+    ],
+)
+def test_sampling_distribution(provider):
+    """Verify that a sampler produces the correct distribution.
 
     Uses synthetic inputs with two known logit vectors (ascending and descending),
     draws many samples, and checks that each empirical distribution fits the
@@ -55,8 +66,13 @@ def test_fused_triton_sampling_distribution():
     num_samples = 10_000
     temperature = 5.0
 
-    samples = fused_mm_sample_triton(
-        inputs.weights, inputs.hidden_states, num_samples, temperature, seed=42
+    sampler = get_sampler(provider, weights=inputs.weights)
+    sampler.prepare()
+    samples = sampler.sample(
+        weights=inputs.weights,
+        hidden_states=inputs.hidden_states,
+        num_samples=num_samples,
+        temperature=temperature,
     )
 
     for seq_idx in range(inputs.logits.shape[0]):
@@ -76,5 +92,5 @@ def test_fused_triton_sampling_distribution():
         _, p_value = chisquare(obs, exp)
         assert p_value > 0.001, (
             f"Sampling distribution mismatch for seq {seq_idx}: p={p_value:.6f}. "
-            f"Fused kernel does not match the expected softmax distribution."
+            f"{provider} does not match the expected softmax distribution."
         )

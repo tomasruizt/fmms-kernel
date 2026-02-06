@@ -30,7 +30,9 @@ def sample(
         logits = matmul(hidden_states, weights)  # [n_hidden_states, V]
     else:
         logits = hidden_states @ weights.T  # [n_hidden_states, V]
-    probs = (logits / temperature).softmax(dim=1)
+    # Upcast to float32: torch.multinomial produces incorrect distributions with bfloat16.
+    # If we remove the cast, the correctness test fails (a chi-squared test).
+    probs = (logits.float() / temperature).softmax(dim=1)
     samples = torch.multinomial(probs, num_samples=num_samples, replacement=True)
     if return_probs:
         return samples, probs
