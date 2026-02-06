@@ -301,7 +301,7 @@ def fused_mm_sample_triton_kernel(
         # otherwise they all create the same noise, leading to sampling artifacts.
         # Compute gumbel noise directly to reduce register pressure
         if GUMBEL:
-            logits_plus_noise = logits_blk + tl.log(
+            logits_plus_noise = logits_blk - tl.log(
                 -tl.log(
                     tl.rand(
                         seed + pid_v * 100 + pid_h * 1_000 + batch_idx * 10_000,
