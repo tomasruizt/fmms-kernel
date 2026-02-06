@@ -14,7 +14,7 @@ def test_jl_sampling_aproximate_correctness():
     folder = Path(__file__).parent / "qwen3-0.6b"
     weights = torch.load(folder / "weights.pt", map_location=device)
     hidden_states = torch.load(folder / "hidden_states.pt", map_location=device)
-    expected_logits = hidden_states @ weights
+    expected_logits = hidden_states @ weights.T
     expected_probs = expected_logits.softmax(dim=1)
 
     jl_sampler = JLSampler.from_weights(weights, epsilon=0.2).prepare()
