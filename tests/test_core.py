@@ -47,10 +47,9 @@ def test_bsz_h(args):
 def test_fused_triton_sampling_distribution():
     """Verify that the fused Triton kernel samples from the correct distribution.
 
-    Uses synthetic inputs with known ascending logits (higher token indices are
-    more likely), draws many samples, and checks that the empirical distribution
-    fits the theoretical softmax probabilities via a chi-squared test. A sign
-    error in the Gumbel noise would invert the distribution.
+    Uses synthetic inputs with two known logit vectors (ascending and descending),
+    draws many samples, and checks that each empirical distribution fits the
+    theoretical softmax probabilities via a chi-squared test.
     """
     inputs = make_synthetic_inputs()
     num_samples = 10_000
@@ -60,22 +59,25 @@ def test_fused_triton_sampling_distribution():
         inputs.weights, inputs.hidden_states, num_samples, temperature, seed=42
     )
 
-    # Compare empirical counts against theoretical expected counts from softmax.
-    expected_probs = (inputs.logits.squeeze() / temperature).softmax(dim=0)
-    expected_counts = (expected_probs * num_samples).cpu().numpy()
-    empirical_counts = torch.bincount(samples[0], minlength=inputs.vocab_size).float().cpu().numpy()
+    for seq_idx in range(inputs.logits.shape[0]):
+        # Compare empirical counts against theoretical expected counts from softmax.
+        expected_probs = (inputs.logits[seq_idx] / temperature).softmax(dim=0)
+        expected_counts = (expected_probs * num_samples).cpu().numpy()
+        empirical_counts = (
+            torch.bincount(samples[seq_idx], minlength=inputs.vocab_size).float().cpu().numpy()
+        )
 
-    # Only test bins with enough expected counts for chi-squared to be valid.
-    mask = expected_counts >= 5
-    obs = empirical_counts[mask]
-    exp = expected_counts[mask]
-    # Rescale expected counts so sums match (samples in excluded bins shift the totals).
-    exp = exp * (obs.sum() / exp.sum())
-    _, p_value = chisquare(obs, exp)
-    assert p_value > 0.001, (
-        f"Sampling distribution mismatch: p={p_value:.6f}. "
-        f"Fused kernel does not match the expected softmax distribution."
-    )
+        # Only test bins with enough expected counts for chi-squared to be valid.
+        mask = expected_counts >= 5
+        obs = empirical_counts[mask]
+        exp = expected_counts[mask]
+        # Rescale expected counts so sums match (samples in excluded bins shift the totals).
+        exp = exp * (obs.sum() / exp.sum())
+        _, p_value = chisquare(obs, exp)
+        assert p_value > 0.001, (
+            f"Sampling distribution mismatch for seq {seq_idx}: p={p_value:.6f}. "
+            f"Fused kernel does not match the expected softmax distribution."
+        )
 
 
 @dataclass
@@ -90,8 +92,14 @@ class SyntheticInputs:
 
 
 def make_synthetic_inputs(vocab_size: int = 256, hidden_size: int = 10) -> SyntheticInputs:
-    """Build weights and hidden_states that produce known ascending logits."""
-    logits = torch.arange(-vocab_size / 2, vocab_size / 2, dtype=torch.float32)[None, :].to(device)
+    """Build weights and hidden_states that produce known logits.
+
+    Creates two hidden states: one with ascending logits (favors high token
+    indices) and one with descending logits (favors low token indices).
+    """
+    logits1 = torch.arange(-vocab_size / 2, vocab_size / 2, dtype=torch.float32)[None, :]
+    logits2 = torch.arange(vocab_size / 2, -vocab_size / 2, step=-1, dtype=torch.float32)[None, :]
+    logits = torch.cat([logits1, logits2], dim=0).to(device)  # [2, V]
     n_hidden_states = logits.shape[0]
 
     U, _, _ = torch.linalg.svd(logits, full_matrices=False)  # noqa: N806
