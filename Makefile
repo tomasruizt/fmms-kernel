@@ -1,3 +1,7 @@
+update-deps:
+	uv lock --upgrade  # Re-resolve all deps to latest compatible versions
+	uv sync --all-extras  # Install exact versions from lockfile, including optional groups
+
 GPU := b200
 POSTFIX := 
 VOLUME_DIR_NAME := triton-bench-$(GPU)$(POSTFIX)
