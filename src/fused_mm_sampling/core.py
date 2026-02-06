@@ -450,6 +450,10 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
                     **kwargs, top_p=1.0, top_k=100
                 )
             )
+        case "helion":
+            from .helion_impl import fused_mm_sample_helion
+
+            return SimpleSampler(fused_mm_sample_helion)
         case "flashinfer:sampling_from_logits":
             return SimpleSampler(flashinfer_sampling_from_logits)
         case _:

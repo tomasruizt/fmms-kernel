@@ -44,6 +44,7 @@ def test_bsz_h(args):
     assert bsz_h(h) == expected_bsz_h
 
 
+@pytest.mark.parametrize("vocab_size", [100, 256])
 @pytest.mark.parametrize(
     "provider",
     [
@@ -51,18 +52,19 @@ def test_bsz_h(args):
         "naive-pt",
         "naive-compiled",
         "sequential-compiled",
+        "helion",
         "flashinfer:sampling_from_logits",
         "flashinfer:top_k_top_p_sampling_from_logits",
     ],
 )
-def test_sampling_distribution(provider):
+def test_sampling_distribution(provider, vocab_size):
     """Verify that a sampler produces the correct distribution.
 
     Uses synthetic inputs with two known logit vectors (ascending and descending),
     draws many samples, and checks that each empirical distribution fits the
     theoretical softmax probabilities via a chi-squared test.
     """
-    inputs = make_synthetic_inputs()
+    inputs = make_synthetic_inputs(vocab_size=vocab_size)
     num_samples = 10_000
     temperature = 5.0
 
