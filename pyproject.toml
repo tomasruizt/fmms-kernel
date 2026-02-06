@@ -36,6 +36,7 @@ dev = [
     "seaborn",
     "pytest",
     "flashinfer-python",
+    "modal",
 ]
 gen_inputs = [
     "transformers",
