@@ -68,9 +68,16 @@ def assign_col_samples_per_ms(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(**{"samples/ms": lambda df: df["n_hidden_states"] / df["time[ms]"]})
 
 
+def read_triton_bench_csv(path: Path) -> pd.DataFrame:
+    """Read a Triton benchmark CSV, stripping the ' (Time (ms))' column suffix."""
+    df = pd.read_csv(path)
+    df.columns = [c.removesuffix(" (Time (ms))") for c in df.columns]
+    return df
+
+
 def create_and_triton_bench_plots(folder: Path):
     tgt_folder = folder / "custom-plots"
-    bdf = pd.read_csv(folder / "fused-mm-sample-batch-scaling.csv")
+    bdf = read_triton_bench_csv(folder / "fused-mm-sample-batch-scaling.csv")
     bdf_long = bdf.melt(id_vars=["n_hidden_states"], var_name="provider", value_name="time[ms]")
     bdf_long = assign_col_samples_per_ms(bdf_long)
     bdf_long = bdf_long.query("provider != 'JL Compiled'")
@@ -82,7 +89,7 @@ def create_and_triton_bench_plots(folder: Path):
 
     vdf_csv = folder / "fused-mm-sample-vocab-scaling.csv"
     if vdf_csv.exists():
-        vdf = pd.read_csv(vdf_csv)
+        vdf = read_triton_bench_csv(vdf_csv)
         vdf_long = vdf.melt(id_vars=["vocab_size"], var_name="provider", value_name="time[ms]")
         vdf_long = vdf_long.query("provider != 'JL Compiled'")
         ax = plot_vocab_scaling(vdf_long)

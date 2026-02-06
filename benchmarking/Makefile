@@ -7,9 +7,6 @@ download-html-conversion-tool:
 	wget https://raw.githubusercontent.com/pytorch/pytorch/refs/heads/main/torch/cuda/_memory_viz.py
 
 
-speed-test:
-	python speed_test.py
-
 NCU=$(shell which ncu)
 NSYS=$(shell which nsys)
 PYTHON=$(shell which python)
