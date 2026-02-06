@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -6,6 +5,7 @@ import torch
 from scipy.stats import chisquare
 
 from fused_mm_sampling.core import JLSampler, bsz_h, fused_mm_sample_triton
+from fused_mm_sampling.testing import make_synthetic_inputs
 
 device = torch.device("cuda")
 
@@ -78,43 +78,3 @@ def test_fused_triton_sampling_distribution():
             f"Sampling distribution mismatch for seq {seq_idx}: p={p_value:.6f}. "
             f"Fused kernel does not match the expected softmax distribution."
         )
-
-
-@dataclass
-class SyntheticInputs:
-    weights: torch.Tensor  # [V, D], bfloat16
-    hidden_states: torch.Tensor  # [n_hidden_states, D], bfloat16
-    logits: (
-        torch.Tensor
-    )  # [n_hidden_states, V], float32 (the exact logits before bf16 quantization)
-    vocab_size: int
-    hidden_size: int
-
-
-def make_synthetic_inputs(vocab_size: int = 256, hidden_size: int = 10) -> SyntheticInputs:
-    """Build weights and hidden_states that produce known logits.
-
-    Creates two hidden states: one with ascending logits (favors high token
-    indices) and one with descending logits (favors low token indices).
-    """
-    logits1 = torch.arange(-vocab_size / 2, vocab_size / 2, dtype=torch.float32)[None, :]
-    logits2 = torch.arange(vocab_size / 2, -vocab_size / 2, step=-1, dtype=torch.float32)[None, :]
-    logits = torch.cat([logits1, logits2], dim=0).to(device)  # [2, V]
-    n_hidden_states = logits.shape[0]
-
-    U, _, _ = torch.linalg.svd(logits, full_matrices=False)  # noqa: N806
-
-    torch.manual_seed(0)
-    hidden_states = torch.cat(
-        [U, torch.rand((n_hidden_states, hidden_size - n_hidden_states), device=device)],
-        dim=1,
-    ).to(device)
-    weights = torch.linalg.pinv(hidden_states) @ logits  # [D, V]
-
-    return SyntheticInputs(
-        weights=weights.bfloat16().T.contiguous(),  # [V, D]
-        hidden_states=hidden_states.bfloat16(),
-        logits=logits,
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-    )
