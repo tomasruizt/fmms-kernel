@@ -75,6 +75,7 @@ class Case:
 
 all_providers = [
     "fused-triton",
+    "helion",
     "naive-compiled",
     # "sequential-compiled",
     # "naive-tl-matmul",

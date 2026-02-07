@@ -17,16 +17,18 @@ class SyntheticInputs:
 def make_synthetic_inputs(
     vocab_size: int = 256,
     hidden_size: int = 10,
+    n_hidden_states: int = 2,
     device: torch.device = torch.device("cuda"),
 ) -> SyntheticInputs:
     """Build weights and hidden_states that produce known logits.
 
-    Creates two hidden states: one with ascending logits (favors high token
-    indices) and one with descending logits (favors low token indices).
+    Creates up to two hidden states: one with ascending logits (favors high
+    token indices) and one with descending logits (favors low token indices).
     """
     logits1 = torch.arange(-vocab_size / 2, vocab_size / 2, dtype=torch.float32)[None, :]
     logits2 = torch.arange(vocab_size / 2, -vocab_size / 2, step=-1, dtype=torch.float32)[None, :]
-    logits = torch.cat([logits1, logits2], dim=0).to(device)  # [2, V]
+    all_logits = [logits1, logits2]
+    logits = torch.cat(all_logits[:n_hidden_states], dim=0).to(device)
     n_hidden_states = logits.shape[0]
 
     U, _, _ = torch.linalg.svd(logits, full_matrices=False)  # noqa: N806

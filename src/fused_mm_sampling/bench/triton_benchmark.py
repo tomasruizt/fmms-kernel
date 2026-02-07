@@ -43,6 +43,7 @@ class CliArgs(Args, cli_parse_args=True):
 provider_names = {
     "fused-triton": "Fused Matmul-Sampling",
     "fused-triton-no-gumbel": "Fused Matmul-Sampling-No-Noise",
+    "helion": "Helion Fused Matmul-Sampling",
     "naive-compiled": "Naive PyTorch Compiled",
     # "sequential-compiled": "Sequential PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",
@@ -51,7 +52,14 @@ provider_names = {
     "flashinfer:sampling_from_logits": "flashinfer:sampling_from_logits",
 }
 
-all_styles = [("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-"), ("purple", "-")]
+all_styles = [
+    ("blue", "-"),
+    ("green", "-"),
+    ("cyan", "-"),
+    ("orange", "-"),
+    ("red", "-"),
+    ("purple", "-"),
+]
 
 
 def create_benchmark(args: Args, mode: str):

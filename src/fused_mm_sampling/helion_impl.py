@@ -5,18 +5,24 @@ It is only used for performance comparisons.
 """
 
 import os
+from pathlib import Path
 
 # Since the helion kernel samples (is stochastic), we should not verify exactness.
 os.environ["HELION_AUTOTUNE_ACCURACY_CHECK"] = "0"
+# Store autotuned configs in this repo so they persist across machines and /tmp cleanups.
+os.environ.setdefault(
+    "HELION_CACHE_DIR", str(Path(__file__).resolve().parent.parent.parent / "helion-cache")
+)
 
 import helion
 import helion.language as hl
 import torch
 
-BLOCK_SIZE_V = 32
+BLOCK_SIZE_V = 128
 
 
-@helion.kernel(autotune_effort="none")
+# autotune_effort: "none" / "quick" / "full". Override via HELION_AUTOTUNE_EFFORT env var.
+@helion.kernel(autotune_effort=os.environ.get("HELION_AUTOTUNE_EFFORT", "quick"))
 def fused_sample_helion_kernel(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [D, H]
