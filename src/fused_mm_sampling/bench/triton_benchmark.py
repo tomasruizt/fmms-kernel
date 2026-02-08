@@ -41,9 +41,9 @@ class CliArgs(Args, cli_parse_args=True):
 
 
 provider_names = {
-    "fused-triton": "Fused Matmul-Sampling",
-    "fused-triton-no-gumbel": "Fused Matmul-Sampling-No-Noise",
-    "helion": "Helion Fused Matmul-Sampling",
+    "fused-triton": "FMMS (Triton)",
+    "fused-triton-no-gumbel": "FMMS (Triton NoNoise)",
+    "helion": "FMMS (Helion)",
     "naive-compiled": "Naive PyTorch Compiled",
     # "sequential-compiled": "Sequential PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",
@@ -121,7 +121,7 @@ def create_benchmark(args: Args, mode: str):
                 "flashinfer:sampling_from_logits",
             ],
             line_names=[
-                "Fused Matmul-Sampling",
+                "FMMS (Triton)",
                 "Naive Compiled",
                 "JL Compiled",
                 "flashinfer:top_k_top_p_sampling_from_logits",
