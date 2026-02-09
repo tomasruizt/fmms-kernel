@@ -370,6 +370,70 @@ Both kernels become available since they're registered in `get_sampler()`.
 4. Benchmark: compare throughput (tokens/sec) and latency (TTFT, TPOT)
    with and without FMMS using `vllm bench serve`.
 
+## Implementation status
+
+The integration is complete and benchmarked on the `feature/fmms-sampler` branch in `~/code/vllm`.
+
+### Files modified in vLLM
+
+| File | Change |
+|------|--------|
+| `vllm/envs.py` | Added `VLLM_USE_FMMS_SAMPLER` and `VLLM_FMMS_PROVIDER` env vars |
+| `vllm/v1/sample/fmms_sampler.py` | New file — thin wrapper adapting FMMS kernel to `SamplerOutput` |
+| `vllm/v1/worker/gpu_model_runner.py` | 5 edits: `ExecuteModelState.logits` → `Optional`, init sampler, capture `lm_head.weight`, skip `compute_logits`, add FMMS branch in `_sample()` |
+
+### Install fused-mm-sampling in the vLLM venv
+
+```bash
+cd ~/code/vllm && uv pip install -e ~/code/fused-mm-sample --python venv/bin/python
+```
+
+## Benchmark results
+
+Benchmarked with `vllm bench sweep serve` on Qwen/Qwen3-1.7B, RTX 3090.
+See `findings/vllm-bench-results/README.md` for full details and reproduction via `make`.
+
+Three variants:
+- **Baseline**: vLLM default (cuBLAS `compute_logits` + FlashInfer sampler)
+- **FMMS Triton**: Fused matmul+sampling kernel (`fused-triton` provider)
+- **FMMS FlashInfer**: Control — unfused matmul + FlashInfer sampling through FMMS integration path
+
+### Median TPOT (ms)
+
+| Concurrency | Baseline | FMMS Triton | FMMS FlashInfer |
+|---|---|---|---|
+| 1 | 5.24 | 5.11 | 5.30 |
+| 32 | 8.95 | 8.79 | 8.93 |
+
+All three variants perform equivalently. FMMS Triton matches baseline within noise.
+
+### Key finding: `.item()` CPU-GPU sync
+
+An earlier version used `temperature[0].item()` to extract a scalar from the per-request temperature tensor. This caused a CPU-GPU synchronization on every decode step, which compounded at high concurrency (TPOT was 18.66ms vs 8.98ms baseline at concurrency 32). Replacing with `temperature[0]` (keeping the value as a scalar tensor) eliminated the regression.
+
+## Commands
+
+### Run benchmarks
+
+```bash
+make -C findings/vllm-bench-results all        # all three variants
+make -C findings/vllm-bench-results baseline    # just baseline
+make -C findings/vllm-bench-results fmms-triton # just FMMS Triton
+```
+
+### Smoke test
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-1.7B",
+    "messages": [{"role": "user", "content": "What is 2+2? Answer in one word."}],
+    "temperature": 0.6,
+    "max_tokens": 32
+  }' | python3 -m json.tool
+```
+
 ## Summary
 
 | Aspect | Detail |
@@ -381,3 +445,5 @@ Both kernels become available since they're registered in `get_sampler()`.
 | **FMMS limitation** | No top-k, top-p, min_p, penalties, logprobs, or structured output |
 | **Positioning** | Performance optimization for simple sampling configurations |
 | **Files changed** | `envs.py`, `gpu_model_runner.py`, new `fmms_sampler.py` |
+| **Performance** | Matches baseline TPOT at all concurrency levels (Qwen3-1.7B, RTX 3090) |
+| **Pitfall** | Avoid `.item()` on GPU tensors — causes CPU-GPU sync that kills throughput at high concurrency |
