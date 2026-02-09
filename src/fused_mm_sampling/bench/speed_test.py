@@ -9,6 +9,7 @@ import triton.profiler as proton
 from pydantic_settings import BaseSettings
 
 from ..core import fused_mm_sample_triton_kernel, get_gpu_name, get_sampler, sample
+from .triton_benchmark import BENCHMARK_CASES
 
 device = torch.device("cuda")
 
@@ -22,12 +23,18 @@ class Args(BaseSettings):
     n_samples: int = 1
     tgt_dir: Path | None = None
     use_proton: bool = False
+    case: str = "large"
 
     def as_case(self, name: str | None = None) -> "Case":
         if name is None:
             name = self.name
         assert self.n_runs_warmup is not None
         assert self.n_runs_benchmark is not None
+        if self.case not in BENCHMARK_CASES:
+            raise ValueError(
+                f"Unknown case: {self.case!r}. Choose from: {list(BENCHMARK_CASES.keys())}"
+            )
+        case_config = BENCHMARK_CASES[self.case]
         return Case(
             name=name,
             n_runs_benchmark=self.n_runs_benchmark,
@@ -35,6 +42,8 @@ class Args(BaseSettings):
             n_hidden_states=self.n_hidden_states,
             n_samples=self.n_samples,
             use_proton=self.use_proton,
+            vocab_size=case_config["vocab_size"],
+            hidden_size=case_config["hidden_size"],
         )
 
     def all_cases(self) -> list["Case"]:
@@ -43,10 +52,6 @@ class Args(BaseSettings):
 
 class CliArgs(Args, cli_parse_args=True):
     pass
-
-
-vocab_size = 256000
-hidden_size = 8192
 
 
 sample_compiled = torch.compile(sample)
@@ -60,14 +65,18 @@ class Case:
     n_hidden_states: int
     n_samples: int
     use_proton: bool
+    vocab_size: int
+    hidden_size: int
 
     def make_fn_kwargs(self) -> dict:
         """This function can be slow because it allocates tensors."""
         return dict(
             hidden_states=torch.randn(
-                (self.n_hidden_states, hidden_size), dtype=torch.bfloat16, device=device
+                (self.n_hidden_states, self.hidden_size), dtype=torch.bfloat16, device=device
             ),
-            weights=torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16, device=device),
+            weights=torch.randn(
+                (self.vocab_size, self.hidden_size), dtype=torch.bfloat16, device=device
+            ),
             num_samples=self.n_samples,
             temperature=1.0,
         )
@@ -176,15 +185,19 @@ def benchmark_all(cases: list[Case]) -> pd.DataFrame:
 def run_speed_test(args: Args) -> None:
     """Run a speed test for a given set of arguments."""
     print("GPU:", get_gpu_name())
-    print("Arguments: ", args)
+    print("Arguments:", args.model_dump_json())
+    case_config = BENCHMARK_CASES[args.case]
+    print(f"Benchmark case: {args.case}")
+    print(f"  vocab_size: {case_config['vocab_size']}")
+    print(f"  hidden_size: {case_config['hidden_size']}")
+    print(f"  n_hidden_states: {args.n_hidden_states}")
+    print(f"  n_samples: {args.n_samples}")
+    print()
     if args.name is not None:
         cases = [args.as_case()]
     else:
         cases = args.all_cases()
     df = benchmark_all(cases)
-    print(f"{vocab_size=}")
-    print(f"{hidden_size=}")
-    print(f"{args.n_hidden_states=}")
     print(f"{args.n_samples=}")
 
     total_runtimes = df.groupby(["name", "total[s]"], as_index=False).size()

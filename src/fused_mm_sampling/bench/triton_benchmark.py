@@ -15,25 +15,25 @@ torch._dynamo.config.cache_size_limit = 1_000
 
 device = torch.device("cuda")
 
-# LLama-3.3-70B: https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct/blob/main/config.json
-BASE_VOCAB_SIZE = 128256
-HIDDEN_SIZE = 8192
+# Benchmark configurations representing real LLM sizes.
+# See findings/lm-head-configurations.md for details.
+BENCHMARK_CASES = {
+    "small": {"vocab_size": 128_256, "hidden_size": 4_096},  # Llama 3 8B, Qwen3 8B
+    "large": {"vocab_size": 128_256, "hidden_size": 8_192},  # Llama 3 70B, DeepSeek V3
+}
+
 N_SAMPLES = 1
 TEMPERATURE = 1.0
 
-# Qwen3-0.6B: https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json
-# BASE_VOCAB_SIZE = 151936
-# HIDDEN_SIZE = 1024
 
-# SmolLM2-135M: https://huggingface.co/HuggingFaceTB/SmolLM2-135M/blob/main/config.json
-# BASE_VOCAB_SIZE = 49152
-# HIDDEN_SIZE = 576
+ALL_CASES = list(BENCHMARK_CASES.keys())
 
 
 class Args(BaseSettings):
     tgt_dir: Path
     name: str | None = None
     n_hidden_states: int | None = None
+    case: str = "all"
 
 
 class CliArgs(Args, cli_parse_args=True):
@@ -62,8 +62,12 @@ all_styles = [
 ]
 
 
-def create_benchmark(args: Args, mode: str):
-    """Create a benchmark function for the specified mode."""
+def create_benchmark(args: Args, case: str):
+    """Create a benchmark function for a specific case."""
+
+    case_config = BENCHMARK_CASES[case]
+    vocab_size = case_config["vocab_size"]
+    hidden_size = case_config["hidden_size"]
 
     if args.n_hidden_states is not None:
         x_vals = [args.n_hidden_states]
@@ -77,73 +81,26 @@ def create_benchmark(args: Args, mode: str):
 
     lines_names = [provider_names[prov] for prov in providers]
 
-    if mode == "batch":
-        # Scale over batch size (n_hidden_states)
-        config = triton.testing.Benchmark(
-            x_names=["n_hidden_states"],
-            x_vals=x_vals,
-            # x_vals=[1, 8, 16, 64, 128],
-            x_log=True,
-            line_arg="provider",
-            line_vals=providers,
-            line_names=lines_names,
-            styles=all_styles[: len(providers)],
-            ylabel="Time (ms)",
-            plot_name="fused-mm-sample-batch-scaling",
-            args={},
+    config = triton.testing.Benchmark(
+        x_names=["n_hidden_states"],
+        x_vals=x_vals,
+        x_log=True,
+        line_arg="provider",
+        line_vals=providers,
+        line_names=lines_names,
+        styles=all_styles[: len(providers)],
+        ylabel="Time (ms)",
+        plot_name=f"fused-mm-sample-batch-scaling-{case}",
+        args={},
+    )
+
+    @triton.testing.perf_report(config)
+    def benchmark(n_hidden_states, provider):
+        hidden_states = torch.randn(
+            (n_hidden_states, hidden_size), dtype=torch.bfloat16, device=device
         )
-
-        @triton.testing.perf_report(config)
-        def benchmark(n_hidden_states, provider):
-            # Prepare inputs with fixed vocab_size, varying batch
-            hidden_states = torch.randn(
-                (n_hidden_states, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
-            )
-            weights = torch.randn(
-                (BASE_VOCAB_SIZE, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
-            )
-            return _run_benchmark(hidden_states, weights, provider)
-
-    elif mode == "vocab":
-        raise NotImplementedError("Please fix")
-        # Scale over vocabulary size
-        config = triton.testing.Benchmark(
-            x_names=["vocab_size"],
-            x_vals=[250_000, 200_000, 175_000, 150_000, 125_000, 100_000, 80_000, 64_000],
-            # x_vals=[250_000, 175_000, 125_000, 64_000],
-            x_log=True,
-            line_arg="provider",
-            line_vals=[
-                "fused-triton",
-                "naive-compiled",
-                "jl-compiled",
-                "flashinfer:top_k_top_p_sampling_from_logits",
-                "flashinfer:sampling_from_logits",
-            ],
-            line_names=[
-                "FMMS (Triton)",
-                "Naive Compiled",
-                "JL Compiled",
-                "flashinfer:top_k_top_p_sampling_from_logits",
-                "flashinfer:sampling_from_logits",
-            ],
-            styles=[("blue", "-"), ("green", "-"), ("orange", "-"), ("red", "-"), ("purple", "-")],
-            ylabel="Time (ms)",
-            plot_name="fused-mm-sample-vocab-scaling",
-            args={},
-        )
-
-        @triton.testing.perf_report(config)
-        def benchmark(vocab_size, provider):
-            # Prepare inputs with fixed batch, varying vocab_size
-            hidden_states = torch.randn(
-                (256, HIDDEN_SIZE), dtype=torch.bfloat16, device=device
-            )  # Fixed batch=256
-            weights = torch.randn((HIDDEN_SIZE, vocab_size), dtype=torch.bfloat16, device=device)
-            return _run_benchmark(hidden_states, weights, provider)
-
-    else:
-        raise ValueError(f"Unknown mode: {mode}. Choose 'batch' or 'vocab'.")
+        weights = torch.randn((vocab_size, hidden_size), dtype=torch.bfloat16, device=device)
+        return _run_benchmark(hidden_states, weights, provider)
 
     return benchmark
 
@@ -169,22 +126,33 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
     return triton.testing.do_bench(fn, quantiles=quantiles)
 
 
+def _resolve_cases(case: str) -> list[str]:
+    if case == "all":
+        return ALL_CASES
+    if case not in BENCHMARK_CASES:
+        raise ValueError(f"Unknown case: {case!r}. Choose from: {ALL_CASES + ['all']}")
+    return [case]
+
+
 def run_triton_bechmark(args: Args):
     print("GPU:", get_gpu_name())
     print("Arguments:", args.model_dump_json())
-    modes = ["batch"]  # , "vocab"]
 
-    for mode in modes:
+    cases = _resolve_cases(args.case)
+    directory = args.tgt_dir
+    os.makedirs(directory, exist_ok=True)
+
+    for case in cases:
+        case_config = BENCHMARK_CASES[case]
         print("=" * 80)
-        print(f"Benchmark Mode: {mode}")
+        print(f"Benchmark Case: {case}")
         print("Configuration:")
-        print(f"  hidden_size: {HIDDEN_SIZE}")
+        print(f"  vocab_size: {case_config['vocab_size']}")
+        print(f"  hidden_size: {case_config['hidden_size']}")
         print(f"  n_samples: {N_SAMPLES}")
         print(f"  temperature: {TEMPERATURE}")
         print()
 
-        benchmark = create_benchmark(args, mode)
-        directory = args.tgt_dir
-        os.makedirs(directory, exist_ok=True)
+        benchmark = create_benchmark(args, case)
         benchmark.run(print_data=True, save_path=directory)
         print()

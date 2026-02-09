@@ -7,6 +7,7 @@ app = make_app()
 
 gpu = os.getenv("GPU")
 tgt_dir = os.getenv("TGT_DIR")
+case = os.getenv("CASE", "all")
 
 
 @app.function(gpu=gpu, image=make_image(), volumes=make_volumes(), timeout=10 * 60)
@@ -16,5 +17,5 @@ def function(args: Args):
 
 @app.local_entrypoint()
 def main():
-    args = Args(tgt_dir=tgt_dir)
+    args = Args(tgt_dir=tgt_dir, case=case)
     function.remote(args=args)
