@@ -44,6 +44,8 @@ The location of `vocab_size` and `hidden_size` in `config.json` depends on the m
 |-------|-------------|----------|-----------|-------------|---------|-------------|-----------------|
 | DeepSeek V3 | [link](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json) | Dec 2024 | 129,280 | 7,168 | 256 | 8 | 1.8 GB |
 | Qwen3 235B-A22B | [link](https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/main/config.json) | Apr 2025 | 151,936 | 4,096 | 128 | 8 | 1.2 GB |
+| GPT-OSS 120B | [link](https://huggingface.co/openai/GPT-OSS-120B/blob/main/config.json) | Aug 2025 | 201,088 | 2,880 | 128 | 4 | 1.1 GB |
+| GPT-OSS 20B | [link](https://huggingface.co/openai/GPT-OSS-20B/blob/main/config.json) | Aug 2025 | 201,088 | 2,880 | 32 | 4 | 1.1 GB |
 | DeepSeek V2 | [link](https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/config.json) | May 2024 | 102,400 | 5,120 | 160 | 6 | 1.0 GB |
 | Qwen3 30B-A3B | [link](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json) | Apr 2025 | 151,936 | 2,048 | 128 | 8 | 594 MB |
 | Mixtral 8x22B | [link](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1/blob/main/config.json) | Apr 2024 | 32,000 | 6,144 | 8 | 2 | 375 MB |

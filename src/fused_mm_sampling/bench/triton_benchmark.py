@@ -18,6 +18,7 @@ device = torch.device("cuda")
 # Benchmark configurations representing real LLM sizes.
 # See findings/lm-head-configurations.md for details.
 BENCHMARK_CASES = {
+    "qwen3-1.7b": {"vocab_size": 151_936, "hidden_size": 2_048},  # Qwen3 1.7B
     "small": {"vocab_size": 128_256, "hidden_size": 4_096},  # Llama 3 8B, Qwen3 8B
     "large": {"vocab_size": 128_256, "hidden_size": 8_192},  # Llama 3 70B, DeepSeek V3
 }
@@ -113,7 +114,7 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
         hidden_states=hidden_states,
         weights=weights,
         num_samples=N_SAMPLES,
-        temperature=TEMPERATURE,
+        temperature=torch.tensor(TEMPERATURE, device=weights.device),
     )
 
     sampler = get_sampler(provider, weights=weights)

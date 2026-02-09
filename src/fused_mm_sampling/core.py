@@ -19,7 +19,7 @@ def sample(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
     return_probs: bool = False,
     seed: int = None,
     tl_matmul: bool = False,
@@ -48,7 +48,7 @@ def sequential_sample_pt(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
 ):
     device = weights.device
     V, D = weights.shape  # noqa: N806
@@ -91,7 +91,7 @@ def fused_mm_sample_triton(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
     seed: int,
     GUMBEL: bool = True,  # noqa: N803
 ):
@@ -129,7 +129,7 @@ def fused_mm_sample_triton(
         hidden_size=D,
         n_hidden_states=H,
         num_samples=num_samples,
-        temperature=temperature,
+        temperature_ptr=temperature,
         seed=seed,
         GUMBEL=GUMBEL,
     )
@@ -232,7 +232,7 @@ def fused_mm_sample_triton_kernel(
     hidden_size: tl.constexpr,  # D
     n_hidden_states: tl.constexpr,
     num_samples: tl.constexpr,
-    temperature: float,
+    temperature_ptr,  # scalar (0-d tensor)
     seed: int,
     BLOCK_SIZE_V: tl.constexpr,  # noqa: N803
     BLOCK_SIZE_D: tl.constexpr,  # noqa: N803
@@ -241,6 +241,8 @@ def fused_mm_sample_triton_kernel(
     GROUP_SIZE_V: tl.constexpr,  # noqa: N803
     GUMBEL: tl.constexpr,  # noqa: N803
 ):
+    temperature = tl.load(temperature_ptr)
+
     # Compute a different program ordering to exploit L2 cache, as suggested in
     # https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html
     pid_v = tl.program_id(axis=0)
@@ -392,7 +394,7 @@ class JLSampler(Sampler):
     def sample(
         self,
         hidden_states: torch.Tensor,  # [n_hidden_states, D]
-        temperature: float,
+        temperature: torch.Tensor,  # scalar (0-d)
         num_samples: int,
         seed: int | None = None,  # ignored
         weights: torch.Tensor = None,  # ignored
@@ -464,7 +466,7 @@ def flashinfer_top_k_top_p_sampling_from_logits(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
     top_p: float,
     top_k: int,
 ) -> torch.Tensor:
@@ -487,7 +489,7 @@ def flashinfer_create_logits_and_indices(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = weights.device
     batch_size = hidden_states.shape[0]
@@ -505,7 +507,7 @@ def flashinfer_sampling_from_logits(
     weights: torch.Tensor,  # [D, V]
     hidden_states: torch.Tensor,  # [n_hidden_states, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
 ) -> torch.Tensor:
     batch_size = hidden_states.shape[0]
     logits, indices = flashinfer_create_logits_and_indices(

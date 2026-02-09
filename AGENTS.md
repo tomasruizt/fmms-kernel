@@ -5,6 +5,7 @@ Development notes and lessons learned while building this project.
 ## Code style
 
 - **Top-down structure**: Define high-level functions first, helpers below. A reader should encounter the main logic before the details it delegates to.
+- **Never introduce GPU-CPU synchronizations.** Operations like `tensor.item()`, `float(tensor)`, `tensor.cpu()`, or `print(tensor)` on CUDA tensors force the CPU to wait for all pending GPU work to finish, destroying pipeline parallelism. Pass scalar values as 0-d CUDA tensors instead of extracting Python floats. Both the Triton kernel (`tl.load(temperature_ptr)`) and the Helion kernel (`temperature: torch.Tensor`) accept 0-d tensors directly.
 
 ## Development environment
 

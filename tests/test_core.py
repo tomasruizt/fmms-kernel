@@ -8,6 +8,7 @@ import pytest
 import torch
 from scipy.stats import chisquare
 
+from fused_mm_sampling.bench.speed_test import Args, run_speed_test
 from fused_mm_sampling.core import JLSampler, bsz_h, get_sampler
 from fused_mm_sampling.testing import make_synthetic_inputs
 
@@ -71,7 +72,7 @@ def test_sampling_distribution(provider, vocab_size, n_hidden_states):
     """
     inputs = make_synthetic_inputs(vocab_size=vocab_size, n_hidden_states=n_hidden_states)
     num_samples = 10_000
-    temperature = 5.0
+    temperature = torch.tensor(5.0, device=device)
 
     sampler = get_sampler(provider, weights=inputs.weights)
     sampler.prepare()
@@ -105,3 +106,9 @@ def test_sampling_distribution(provider, vocab_size, n_hidden_states):
             f"Sampling distribution mismatch for seq {seq_idx}: p={p_value:.6f}. "
             f"{provider} does not match the expected softmax distribution."
         )
+
+
+def test_speed_test_smoke():
+    # name=None means all providers are tested
+    args = Args(name=None, n_runs_warmup=1, n_runs_benchmark=1, case="small")
+    run_speed_test(args)

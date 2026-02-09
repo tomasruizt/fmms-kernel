@@ -78,7 +78,7 @@ class Case:
                 (self.vocab_size, self.hidden_size), dtype=torch.bfloat16, device=device
             ),
             num_samples=self.n_samples,
-            temperature=1.0,
+            temperature=torch.tensor(1.0, device=device),
         )
 
 

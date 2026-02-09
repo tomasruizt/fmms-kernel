@@ -28,7 +28,7 @@ def fused_sample_helion_kernel(
     hidden_states: torch.Tensor,  # [D, H]
     tile_maxs: torch.Tensor,  # [n_tiles, H], initialized to -inf
     tile_max_idxs: torch.Tensor,  # [n_tiles, H], output token indices per tile
-    temperature: float,
+    temperature: torch.Tensor,  # [1]
     seed: int,
 ):
     """Stage 1: each (V, H) tile computes its local max and argmax in parallel."""
@@ -41,7 +41,7 @@ def fused_sample_helion_kernel(
         for tile_d in hl.tile(D):
             mm = torch.matmul(weights[tile_v, tile_d], hidden_states[tile_d, tile_h])
             logits_blk = logits_blk + mm
-        logits_blk = logits_blk / temperature
+        logits_blk = logits_blk / temperature[0]
 
         unif_noise = hl.rand([tile_v, tile_h], seed=seed)
         gumbel_noise = -(-unif_noise.log()).log()
@@ -56,8 +56,9 @@ def fused_mm_sample_helion(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [H, D]
     num_samples: int,
-    temperature: float,
+    temperature: torch.Tensor,  # scalar (0-d)
 ) -> torch.Tensor:
+    temperature = temperature.reshape(1)  # Helion kernel needs 1D tensor for indexing
     V = weights.size(0)  # noqa: N806
     H = hidden_states.size(0)  # noqa: N806
     n_tiles = helion.cdiv(V, BLOCK_SIZE_V)
