@@ -1,5 +1,5 @@
 VLLM_DIR := $(HOME)/code/vllm
-RESULTS_DIR := $(HOME)/code/fused-mm-sample/findings/vllm-bench-results
+RESULTS_DIR := $(HOME)/code/fused-mm-sample/benchmarking/vllm
 VLLM := $(VLLM_DIR)/venv/bin/vllm
 PYTHON := $(HOME)/code/fused-mm-sample/.venv/bin/python
 BENCH_PARAMS := $(RESULTS_DIR)/bench-params.json
@@ -29,10 +29,15 @@ endef
 
 .PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer
 
-all: baseline fmms-triton fmms-flashinfer
+$(MODEL_DIR):
+	mkdir -p "$@"
+
+all: | $(MODEL_DIR)
+	$(MAKE) baseline fmms-triton fmms-flashinfer
 	$(call collect)
 
-quick: quick-baseline quick-fmms-triton quick-fmms-flashinfer
+quick: | $(MODEL_DIR)
+	$(MAKE) quick-baseline quick-fmms-triton quick-fmms-flashinfer
 	$(call collect)
 
 baseline:
