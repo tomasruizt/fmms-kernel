@@ -22,20 +22,29 @@ BLOCK_SIZE_V = 128
 
 
 # autotune_effort: "none" / "quick" / "full". Override via HELION_AUTOTUNE_EFFORT env var.
-@helion.kernel(autotune_effort=os.environ.get("HELION_AUTOTUNE_EFFORT", "quick"))
+@helion.kernel(
+    autotune_effort=os.environ.get("HELION_AUTOTUNE_EFFORT", "quick"),
+    autotune_ignore_errors=True,
+)
 def fused_sample_helion_kernel(
     weights: torch.Tensor,  # [V, D]
     hidden_states: torch.Tensor,  # [D, H]
-    tile_maxs: torch.Tensor,  # [n_tiles, H], initialized to -inf
-    tile_max_idxs: torch.Tensor,  # [n_tiles, H], output token indices per tile
+    out_idxs: torch.Tensor,  # [H] — final sampled token indices
     temperature: float,
     seed: int,
 ):
-    """Stage 1: each (V, H) tile computes its local max and argmax in parallel."""
+    """Single-kernel fused matmul + Gumbel-max sampling with barrier-based reduction."""
     assert weights.size(1) == hidden_states.size(0)
     V, D = weights.size()  # noqa: N806
     H = hidden_states.size(1)  # noqa: N806
+    n_tiles_v = helion.cdiv(V, BLOCK_SIZE_V)
 
+    tile_maxs = torch.full(
+        (n_tiles_v, H), float("-inf"), device=weights.device, dtype=torch.float32
+    )
+    tile_max_idxs = torch.empty((n_tiles_v, H), dtype=torch.long, device=weights.device)
+
+    # Stage 1: per-tile matmul + Gumbel-max (parallel over V and H)
     for tile_v, tile_h in hl.tile([V, H], block_size=[BLOCK_SIZE_V, None]):
         logits_blk = hl.zeros([tile_v, tile_h], dtype=torch.float32)
         for tile_d in hl.tile(D):
@@ -51,6 +60,15 @@ def fused_sample_helion_kernel(
         # torch.argmax in Helion returns global indices (includes tile offset).
         tile_max_idxs[tile_v.id, tile_h] = torch.argmax(summed, dim=0)
 
+    hl.barrier()
+
+    # Stage 2: reduce across V-tiles to find global argmax (parallel over H)
+    for tile_h in hl.tile(H):
+        best_tile = torch.argmax(tile_maxs[:, tile_h], dim=0)  # [tile_h_size]
+        out_idxs[tile_h] = torch.gather(
+            tile_max_idxs[:, tile_h], 0, best_tile.unsqueeze(0)
+        ).squeeze(0)
+
 
 def fused_mm_sample_helion(
     weights: torch.Tensor,  # [V, D]
@@ -58,20 +76,14 @@ def fused_mm_sample_helion(
     num_samples: int,
     temperature: float,
 ) -> torch.Tensor:
-    V = weights.size(0)  # noqa: N806
     H = hidden_states.size(0)  # noqa: N806
-    n_tiles = helion.cdiv(V, BLOCK_SIZE_V)
     hs_t = hidden_states.T.contiguous()  # [D, H]
     results = []
     for i in range(num_samples):
-        tile_maxs = torch.full((n_tiles, H), float("-inf"), device=weights.device)
-        tile_max_idxs = torch.empty((n_tiles, H), dtype=torch.long, device=weights.device)
+        out_idxs = torch.empty(H, dtype=torch.long, device=weights.device)
         seed = torch.randint(0, 2**31, (1,)).item() + i
-        fused_sample_helion_kernel(weights, hs_t, tile_maxs, tile_max_idxs, temperature, seed)
-        # Stage 2: reduce across tiles
-        best_tiles = tile_maxs.argmax(dim=0)  # [H]
-        sample_idx = tile_max_idxs.gather(dim=0, index=best_tiles.unsqueeze(0)).squeeze(0)
-        results.append(sample_idx)
+        fused_sample_helion_kernel(weights, hs_t, out_idxs, temperature, seed)
+        results.append(out_idxs)
     return torch.stack(results, dim=1)  # [H, num_samples]
 
 
