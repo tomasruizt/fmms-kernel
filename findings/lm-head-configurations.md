@@ -3,51 +3,50 @@
 The fused matmul+sampling kernel operates on the LM head: a `[hidden_size, vocab_size]` weight matrix.
 To make meaningful benchmark claims, we need configurations that represent real LLMs.
 
+### Reading config.json files
+
+The location of `vocab_size` and `hidden_size` in `config.json` depends on the model architecture:
+
+- **Text-only models** (Llama, Qwen, Mistral, Phi, Gemma 3 1B): keys are at the **top level**.
+  Architecture is typically `*ForCausalLM`. Look for top-level `vocab_size` and `hidden_size`.
+- **Multimodal models** (Gemma 3 4B/12B/27B): keys are **nested under `text_config`**.
+  Architecture is `*ForConditionalGeneration`. Look for `text_config.vocab_size` and
+  `text_config.hidden_size`. The top-level `hidden_size` (if present) refers to the vision encoder.
+- Some configs **omit `vocab_size`** entirely (e.g. the 12B Gemma 3 config on some mirrors).
+  In that case, it defaults to the model class default (262208 for Gemma 3 multimodal models).
+
 ## Dense Models
 
-| Model | vocab_size | hidden_size | LM Head (bf16) |
-|-------|-----------|-------------|-----------------|
-| Qwen2.5 0.5B | 151,936 | 896 | 260 MB |
-| Qwen3 0.6B | 151,936 | 1,024 | 297 MB |
-| Gemma 3 1B | 262,144 | 1,152 | 576 MB |
-| Qwen2.5 1.5B | 151,936 | 1,536 | 445 MB |
-| Llama 3.2 1B | 128,256 | 2,048 | 501 MB |
-| Gemma 2 2B | 256,000 | 2,304 | 1.1 GB |
-| Qwen3 4B | 151,936 | 2,560 | 742 MB |
-| Gemma 3 4B | 262,208 | 2,560 | 1.3 GB |
-| Llama 3.2 3B | 128,256 | 3,072 | 751 MB |
-| Phi-3 Mini 3.8B | 32,064 | 3,072 | 188 MB |
-| Phi-4 Mini 3.8B | 200,064 | 3,072 | 1.2 GB |
-| Gemma 2 9B | 256,000 | 3,584 | 1.7 GB |
-| Qwen2.5 7B | 152,064 | 3,584 | 1.0 GB |
-| Mistral 7B | 32,000 | 4,096 | 250 MB |
-| Llama 3 8B | 128,256 | 4,096 | 1.0 GB |
-| Qwen3 8B | 151,936 | 4,096 | 1.2 GB |
-| Gemma 3 12B | 262,208 | 3,840 | 1.9 GB |
-| Gemma 2 27B | 256,000 | 4,608 | 2.2 GB |
-| Qwen2.5 14B | 152,064 | 5,120 | 1.5 GB |
-| Qwen2.5 32B | 152,064 | 5,120 | 1.5 GB |
-| Qwen3 14B | 151,936 | 5,120 | 1.5 GB |
-| Qwen3 32B | 151,936 | 5,120 | 1.5 GB |
-| Phi-4 14B | 100,352 | 5,120 | 980 MB |
-| Gemma 3 27B | 262,208 | 5,376 | 2.7 GB |
-| Llama 3 70B | 128,256 | 8,192 | 2.0 GB |
-| Qwen2.5 72B | 152,064 | 8,192 | 2.4 GB |
-| Command R 35B | 256,000 | 8,192 | 4.0 GB |
-| Command R+ 104B | 256,000 | 12,288 | 6.0 GB |
-| Llama 3.1 405B | 128,256 | 16,384 | 4.0 GB |
+| Model | config.json | Released | vocab_size | hidden_size | LM Head (bf16) |
+|-------|-------------|----------|-----------|-------------|-----------------|
+| Command R+ 104B | [link](https://huggingface.co/CohereForAI/c4ai-command-r-plus/blob/main/config.json) | Apr 2024 | 256,000 | 12,288 | 6.0 GB |
+| Llama 3.1 405B | [link](https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json) | Jul 2024 | 128,256 | 16,384 | 4.0 GB |
+| Command R 35B | [link](https://huggingface.co/CohereForAI/c4ai-command-r-v01/blob/main/config.json) | Mar 2024 | 256,000 | 8,192 | 4.0 GB |
+| Gemma 3 27B | [link](https://huggingface.co/google/gemma-3-27b-pt/blob/main/config.json) | Mar 2025 | 262,208 | 5,376 | 2.7 GB |
+| Llama 3 70B | [link](https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json) | Jul 2024 | 128,256 | 8,192 | 2.0 GB |
+| Gemma 3 12B | [link](https://huggingface.co/google/gemma-3-12b-pt/blob/main/config.json) | Mar 2025 | 262,208 | 3,840 | 1.9 GB |
+| Qwen3 14B | [link](https://huggingface.co/Qwen/Qwen3-14B/blob/main/config.json) | Apr 2025 | 151,936 | 5,120 | 1.5 GB |
+| Qwen3 32B | [link](https://huggingface.co/Qwen/Qwen3-32B/blob/main/config.json) | Apr 2025 | 151,936 | 5,120 | 1.5 GB |
+| Gemma 3 4B | [link](https://huggingface.co/google/gemma-3-4b-pt/blob/main/config.json) | Mar 2025 | 262,208 | 2,560 | 1.3 GB |
+| Phi-4 Mini 3.8B | [link](https://huggingface.co/microsoft/Phi-4-mini-instruct/blob/main/config.json) | Feb 2025 | 200,064 | 3,072 | 1.2 GB |
+| Qwen3 8B | [link](https://huggingface.co/Qwen/Qwen3-8B/blob/main/config.json) | Apr 2025 | 151,936 | 4,096 | 1.2 GB |
+| Llama 3 8B | [link](https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json) | Jul 2024 | 128,256 | 4,096 | 1.0 GB |
+| Phi-4 14B | [link](https://huggingface.co/microsoft/phi-4/blob/main/config.json) | Dec 2024 | 100,352 | 5,120 | 980 MB |
+| Llama 3.2 3B | [link](https://huggingface.co/meta-llama/Llama-3.2-3B/blob/main/config.json) | Sep 2024 | 128,256 | 3,072 | 751 MB |
+| Qwen3 4B | [link](https://huggingface.co/Qwen/Qwen3-4B/blob/main/config.json) | Apr 2025 | 151,936 | 2,560 | 742 MB |
+| Gemma 3 1B | [link](https://huggingface.co/google/gemma-3-1b-pt/blob/main/config.json) | Mar 2025 | 262,144 | 1,152 | 576 MB |
+| Llama 3.2 1B | [link](https://huggingface.co/meta-llama/Llama-3.2-1B/blob/main/config.json) | Sep 2024 | 128,256 | 2,048 | 501 MB |
+| Qwen3 0.6B | [link](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json) | Apr 2025 | 151,936 | 1,024 | 297 MB |
 
 ## MoE Models
 
-| Model | vocab_size | hidden_size | Experts | Active/Token | LM Head (bf16) |
-|-------|-----------|-------------|---------|-------------|-----------------|
-| Mixtral 8x7B | 32,000 | 4,096 | 8 | 2 | 250 MB |
-| Mixtral 8x22B | 32,000 | 6,144 | 8 | 2 | 375 MB |
-| Qwen3 30B-A3B | 151,936 | 2,048 | 128 | 8 | 594 MB |
-| Qwen2 57B-A14B | 151,936 | 3,584 | 64 | 8 | 1.0 GB |
-| Qwen3 235B-A22B | 151,936 | 4,096 | 128 | 8 | 1.2 GB |
-| DeepSeek V2 | 102,400 | 5,120 | 160 | 6 | 1.0 GB |
-| DeepSeek V3 | 129,280 | 7,168 | 256 | 8 | 1.8 GB |
+| Model | config.json | Released | vocab_size | hidden_size | Experts | Active/Token | LM Head (bf16) |
+|-------|-------------|----------|-----------|-------------|---------|-------------|-----------------|
+| DeepSeek V3 | [link](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json) | Dec 2024 | 129,280 | 7,168 | 256 | 8 | 1.8 GB |
+| Qwen3 235B-A22B | [link](https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/main/config.json) | Apr 2025 | 151,936 | 4,096 | 128 | 8 | 1.2 GB |
+| DeepSeek V2 | [link](https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/config.json) | May 2024 | 102,400 | 5,120 | 160 | 6 | 1.0 GB |
+| Qwen3 30B-A3B | [link](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json) | Apr 2025 | 151,936 | 2,048 | 128 | 8 | 594 MB |
+| Mixtral 8x22B | [link](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1/blob/main/config.json) | Apr 2024 | 32,000 | 6,144 | 8 | 2 | 375 MB |
 
 ## MoE and the LM Head
 
@@ -70,25 +69,25 @@ Examples at TP=8:
 | Model | Full vocab_size | Per-GPU vocab_size |
 |-------|-----------------|--------------------|
 | Llama 3 70B | 128,256 | 16,032 |
-| Qwen2.5 72B | 152,064 | 19,008 |
 | Gemma 3 27B | 262,208 | 32,776 |
 | DeepSeek V3 | 129,280 | 16,160 |
 
 This is relevant for benchmarking: in production multi-GPU serving, each GPU operates on a
 sharded vocab size (16K-64K) rather than the full 128K-256K.
 
-## Suggested Benchmark Sizes
+## Benchmark Configurations
 
-Natural clustering of `(vocab_size, hidden_size)` across models:
+The most popular open LLMs share similar vocab sizes (~128K-152K). The main differentiator
+is **hidden_size**, which scales with model size and directly affects matmul compute.
 
-| Size | vocab_size | hidden_size | Representative Models |
-|------|-----------|-------------|-----------------------|
-| **Small** | 128,256 | 4,096 | Llama 3 8B, Qwen3 8B, Mistral 7B, Qwen3-235B-A22B (MoE) |
-| **Large** | 128,256 | 8,192 | Llama 3 70B, Qwen2.5 72B, DeepSeek V3 (~7K hidden) |
+| Group | vocab_size | hidden_size | LM Head (bf16) | Representative Models |
+|-------|-----------|-------------|-----------------|----------------------|
+| **Small (8B-class)** | 128,256 | 4,096 | 1.0 GB | Llama 3 8B, Qwen3 8B (V=152K), Qwen3-235B-A22B MoE |
+| **Large (70B-class)** | 128,256 | 8,192 | 2.0 GB | Llama 3 70B, DeepSeek V3 (V=129K, D=7168) |
 
-A third tier could capture large-vocabulary models, since vocab size significantly affects
-memory access patterns:
+The two groups differ by **2x in hidden_size**, giving a clear performance scaling signal.
+Vocab size is held constant at 128,256 (Llama 3) since the most popular model families
+(Llama, Qwen, DeepSeek) all use ~128K-152K vocabularies.
 
-| Size | vocab_size | hidden_size | Representative Models |
-|------|-----------|-------------|-----------------------|
-| **Large-vocab** | 256,000 | 4,608 | Gemma 2 27B, Gemma 3 27B, Command R |
+Gemma 3's 262K vocabulary is an outlier among popular models and could be used as an
+optional stress test for memory-bandwidth sensitivity.
