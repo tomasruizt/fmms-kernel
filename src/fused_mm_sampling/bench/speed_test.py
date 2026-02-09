@@ -19,7 +19,7 @@ class Args(BaseSettings):
     n_runs_warmup: int = 25
     n_runs_benchmark: int = 100
 
-    n_hidden_states: int = 256
+    n_hidden_states: int = 1
     n_samples: int = 1
     tgt_dir: Path | None = None
     use_proton: bool = False
