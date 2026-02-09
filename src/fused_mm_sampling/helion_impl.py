@@ -31,26 +31,25 @@ def fused_sample_helion_kernel(
     temperature: float,
     seed: int,
 ):
-    """Stage 1: each V-tile computes its local max and argmax in parallel."""
+    """Stage 1: each (V, H) tile computes its local max and argmax in parallel."""
     assert weights.size(1) == hidden_states.size(0)
     V, D = weights.size()  # noqa: N806
-    n_hidden_states = hidden_states.size(1)
-    hl_n_hidden_states = hl.specialize(n_hidden_states)
+    H = hidden_states.size(1)  # noqa: N806
 
-    for tile_v in hl.tile(V, block_size=BLOCK_SIZE_V):
-        logits_blk = hl.zeros([tile_v, hl_n_hidden_states], dtype=torch.float32)
+    for tile_v, tile_h in hl.tile([V, H], block_size=[BLOCK_SIZE_V, None]):
+        logits_blk = hl.zeros([tile_v, tile_h], dtype=torch.float32)
         for tile_d in hl.tile(D):
-            mm = torch.matmul(weights[tile_v, tile_d], hidden_states[tile_d, :])
+            mm = torch.matmul(weights[tile_v, tile_d], hidden_states[tile_d, tile_h])
             logits_blk = logits_blk + mm
         logits_blk = logits_blk / temperature
 
-        unif_noise = hl.rand([tile_v, hl_n_hidden_states], seed=seed)
+        unif_noise = hl.rand([tile_v, tile_h], seed=seed)
         gumbel_noise = -(-unif_noise.log()).log()
         summed = logits_blk + gumbel_noise
 
-        tile_maxs[tile_v.id, :] = hl.reduce(torch.max, summed, dim=0)
+        tile_maxs[tile_v.id, tile_h] = hl.reduce(torch.max, summed, dim=0)
         # torch.argmax in Helion returns global indices (includes tile offset).
-        tile_max_idxs[tile_v.id, :] = torch.argmax(summed, dim=0)
+        tile_max_idxs[tile_v.id, tile_h] = torch.argmax(summed, dim=0)
 
 
 def fused_mm_sample_helion(
