@@ -107,6 +107,23 @@ ncu-export-flashinfer:
 		--nvtx-include "kernel/" \
 		$(PYTHON) ./speed_test.py --name flashinfer:sampling_from_logits --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/flashinfer.txt
 
+ncu-profile-helion:
+	mkdir -p $(NCU_RESULTS_DIR)
+	$(SUDO) $(NCU) --set full \
+		--nvtx \
+		--nvtx-include "kernel/" \
+		--kernel-name _helion_fused_sample_helion_kernel \
+		--import-source yes \
+		-fo $(NCU_RESULTS_DIR)/helion $(PYTHON) ./speed_test.py --name helion --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
+
+ncu-export-helion:
+	mkdir -p profiles/ncu-txt
+	$(SUDO) $(NCU) --set full \
+		--nvtx \
+		--nvtx-include "kernel/" \
+		--kernel-name _helion_fused_sample_helion_kernel \
+		$(PYTHON) ./speed_test.py --name helion --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK) > profiles/ncu-txt/helion.txt
+
 ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-flashinfer ncu-export-naive-tl-matmul
 	@echo "NCU reports exported to profiles/ncu-txt/"
 
@@ -131,9 +148,53 @@ ncu-comparison:
 	make ncu-profile-fused-triton N_HIDDEN_STATES=1 NCU_RESULTS_DIR=profiles/ncu-bsz1
 	make ncu-profile-flashinfer N_HIDDEN_STATES=1 NCU_RESULTS_DIR=profiles/ncu-bsz1
 
-proton-profile-fused-triton:
-	rm -rf $(PROTON_RESULTS_DIR)
-	mkdir -p $(PROTON_RESULTS_DIR)
-	$(PYTHON) ./speed_test.py --n_hidden_states=1 --use_proton=True --name=fused-triton --n_runs_benchmark=10 --n_runs_warmup=0
-	proton-viewer -m num_samples/%,time/s kernel.hatchet -i timing > $(PROTON_RESULTS_DIR)/kernel-by-line.txt
-	mv kernel.hatchet $(PROTON_RESULTS_DIR)/kernel.hatchet
+PROTON_NAME=fused-triton
+
+proton-profile:
+	mkdir -p $(PROTON_RESULTS_DIR)/$(PROTON_NAME)
+	$(PYTHON) ./speed_test.py --n_hidden_states=$(N_HIDDEN_STATES) --use_proton=True --name=$(PROTON_NAME) --n_runs_benchmark=10 --n_runs_warmup=0 2>&1 | tee $(PROTON_RESULTS_DIR)/$(PROTON_NAME)/speed-test.txt
+	proton-viewer -m num_samples/%,time/s kernel.hatchet -i timing > $(PROTON_RESULTS_DIR)/$(PROTON_NAME)/kernel-by-line.txt
+	mv kernel.hatchet $(PROTON_RESULTS_DIR)/$(PROTON_NAME)/kernel.hatchet
+
+COMPARISON_DIR=profiles/barrier-comparison
+
+barrier-comparison:
+	@echo "=== Barrier version (working tree) ==="
+	# Speed test
+	mkdir -p $(COMPARISON_DIR)/barrier
+	$(PYTHON) ./speed_test.py --name helion --n_hidden_states=$(N_HIDDEN_STATES) \
+		--n_runs_warmup=25 --n_runs_benchmark=100 \
+		--tgt_dir $(COMPARISON_DIR)/barrier 2>&1 | tee $(COMPARISON_DIR)/barrier/speed-test.txt
+	# Proton
+	mkdir -p $(COMPARISON_DIR)/barrier/proton
+	$(PYTHON) ./speed_test.py --name helion --n_hidden_states=$(N_HIDDEN_STATES) \
+		--use_proton=True --n_runs_benchmark=20 --n_runs_warmup=5 2>&1 | tee $(COMPARISON_DIR)/barrier/proton/speed-test.txt
+	proton-viewer -m num_samples/%,time/s kernel.hatchet -i timing > $(COMPARISON_DIR)/barrier/proton/kernel-by-line.txt
+	mv kernel.hatchet $(COMPARISON_DIR)/barrier/proton/kernel.hatchet
+	# NCU (inlined to survive git stash)
+	mkdir -p $(COMPARISON_DIR)/barrier/ncu
+	$(SUDO) $(NCU) --set full --nvtx --nvtx-include "kernel/" \
+		--kernel-name _helion_fused_sample_helion_kernel --import-source yes \
+		-fo $(COMPARISON_DIR)/barrier/ncu/helion \
+		$(PYTHON) ./speed_test.py --name helion --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
+	@echo "=== Stash to two-stage version ==="
+	git stash
+	# Speed test
+	mkdir -p $(COMPARISON_DIR)/two-stage
+	$(PYTHON) ./speed_test.py --name helion --n_hidden_states=$(N_HIDDEN_STATES) \
+		--n_runs_warmup=25 --n_runs_benchmark=100 \
+		--tgt_dir $(COMPARISON_DIR)/two-stage 2>&1 | tee $(COMPARISON_DIR)/two-stage/speed-test.txt
+	# Proton
+	mkdir -p $(COMPARISON_DIR)/two-stage/proton
+	$(PYTHON) ./speed_test.py --name helion --n_hidden_states=$(N_HIDDEN_STATES) \
+		--use_proton=True --n_runs_benchmark=20 --n_runs_warmup=5 2>&1 | tee $(COMPARISON_DIR)/two-stage/proton/speed-test.txt
+	proton-viewer -m num_samples/%,time/s kernel.hatchet -i timing > $(COMPARISON_DIR)/two-stage/proton/kernel-by-line.txt
+	mv kernel.hatchet $(COMPARISON_DIR)/two-stage/proton/kernel.hatchet
+	# NCU (inlined to survive git stash)
+	mkdir -p $(COMPARISON_DIR)/two-stage/ncu
+	$(SUDO) $(NCU) --set full --nvtx --nvtx-include "kernel/" \
+		--kernel-name _helion_fused_sample_helion_kernel --import-source yes \
+		-fo $(COMPARISON_DIR)/two-stage/ncu/helion \
+		$(PYTHON) ./speed_test.py --name helion --n_hidden_states $(N_HIDDEN_STATES) --n_runs_benchmark $(N_RUNS_BENCHMARK)
+	@echo "=== Restore barrier version ==="
+	git stash pop

@@ -16,6 +16,8 @@ The `findings/` directory contains detailed write-ups of bugs, workarounds, and 
 
 - `upcasting-before-softmax.md` — `torch.multinomial` produces wrong distributions with bfloat16 due to CDF precision loss. Fix: upcast to float32 before softmax.
 - `helion-hl-rand-specialize-1-bug.md` — `hl.rand` crashes when a dimension is `hl.specialize(1)`. Includes root cause analysis, in-place fix, and minimal reproduction.
+- `helion-barrier-single-kernel.md` — Merging stage 2 into the Helion kernel with `hl.barrier()`. Eliminates host-side reduction, reduces kernel launches from 3 to 1. Rigorous benchmarking shows barrier is ~3% slower at H=1 (host overhead is negligible). Barrier code is on the `barrier-kernel` branch.
+- `rtx3090-barrier-comparison/` — Raw benchmark results (speed test, proton, NCU) for barrier vs two-stage on RTX 3090.
 
 ## Architecture
 
@@ -47,15 +49,30 @@ new_max_idx = torch.argmax(summed, dim=0)
 
 Each tile becomes a separate GPU program (thread block) that runs in parallel. You **cannot** do cross-tile communication via shared tensors — it's a race condition. This manifests as correct-looking results for some vocab sizes (e.g. 256, evenly divisible) but broken distributions for others (e.g. 100).
 
-**Fix**: Use a two-stage approach:
-1. **Stage 1 (kernel)**: Each tile writes its local max/argmax to `tile_maxs[tile_v.id, :]`.
-2. **Stage 2 (Python)**: Reduce across tiles with `argmax` + `gather`.
+**Fix**: Use `hl.barrier()` to synchronize stages within a single kernel:
+1. **Stage 1**: Each `(V, H)` tile writes its local max/argmax to `tile_maxs[tile_v.id, :]`.
+2. `hl.barrier()` — grid-wide sync.
+3. **Stage 2**: Reduce across tiles with `argmax` + `gather` inside the same kernel.
 
-This matches the pattern used by the hand-written Triton kernel.
+This eliminates Python-side tensor allocations and separate kernel launches for the reduction. However, rigorous benchmarking (25 warmup + 100 runs) shows the barrier version is ~3% **slower** at H=1 on RTX 3090 (2.38ms vs 2.32ms) due to cooperative launch constraints (`num_stages=1`, persistent scheduling, barrier sync stalls). The host-side overhead it eliminates is only ~0.01ms — negligible. The ~5ms gap seen under Proton profiling is an instrumentation artifact (Proton adds fixed overhead per kernel launch). See `findings/helion-barrier-single-kernel.md`.
 
 ### Tensor allocations inside kernels trigger warnings
 
 `TensorOperationInWrapper` warning fires for tensor ops outside `hl.tile` loops. Allocate output buffers in the Python wrapper and pass them as kernel arguments instead.
+
+### Advanced indexing does not work for gather
+
+Helion interprets `tensor[idx_tensor, tile_var]` as a Cartesian product (producing a higher-rank result), not element-wise gather. Use `torch.gather` instead:
+
+```python
+# WRONG — Cartesian product, produces 2D
+out[tile_h] = tile_max_idxs[best_tile, tile_h]  # RankMismatch error
+
+# CORRECT — element-wise gather
+out[tile_h] = torch.gather(
+    tile_max_idxs[:, tile_h], 0, best_tile.unsqueeze(0)
+).squeeze(0)
+```
 
 ### Random number generation
 
@@ -71,9 +88,13 @@ Use `hl.rand([tile_v, n], seed=seed)` — not `torch.rand` or `torch.rand_like`.
 - Set `HELION_AUTOTUNE_ACCURACY_CHECK=0` for stochastic kernels (the kernel output changes each run, so accuracy checks would always fail).
 - To force re-tuning: delete the cache dir or set `HELION_SKIP_CACHE=1`.
 
-### Performance: BLOCK_SIZE_V matters for stage 2
+### Performance: barrier kernel vs two-stage
 
-With `BLOCK_SIZE_V=32` and vocab=128K, there are 4000 tiles. The stage-2 `argmax` over 4000 rows costs ~1ms. Increasing to `BLOCK_SIZE_V=128` (1000 tiles) drops stage-2 to 0.02ms with no kernel slowdown.
+Rigorous benchmarking (25 warmup + 100 runs, RTX 3090, V=128K, D=8192, H=1) shows the **two-stage version is ~3% faster** (2.32ms vs 2.38ms median). The host-side overhead eliminated by the barrier (tensor alloc + 3 auxiliary kernel launches) is only ~0.01ms. The barrier kernel pays for cooperative launch constraints: `num_stages=1` (no pipelining), 164 persistent blocks vs 1,002 one-shot blocks, and 52% of CPI spent on barrier sync stalls.
+
+Initial Proton profiling showed a ~5ms wall-clock advantage for the barrier version — this is a **profiling artifact**. Proton adds fixed instrumentation overhead per kernel launch, making the 4-launch two-stage appear much slower than the 1-launch barrier. Always cross-reference Proton with uninstrumented speed tests.
+
+See `findings/helion-barrier-single-kernel.md` for full NCU and Proton analysis, and `findings/rtx3090-barrier-comparison/` for raw data.
 
 ## `torch.multinomial` and bfloat16
 
@@ -100,6 +121,21 @@ The algorithm is called **FMMS** (Fused Matrix Multiplication & Sampling). Provi
 - `"FMMS (Triton NoNoise)"` — Triton kernel without Gumbel noise (for profiling)
 
 These names are defined in `provider_names` in `src/fused_mm_sampling/bench/triton_benchmark.py` and used in plots, CSVs, and the README.
+
+## Proton profiling
+
+Documentation: https://github.com/triton-lang/triton/tree/main/third_party/proton
+
+`speed_test.py --use_proton=True` enables Proton profiling with `mode="pcsampling"` (instruction sampling), which gives per-line runtime breakdowns for Triton kernels. Key API:
+
+- `proton.start(name, hook="triton", backend="cupti", mode="pcsampling")` — initialize profiling. `mode="pcsampling"` enables PC sampling for per-line stats (~20x end-to-end overhead, but per-kernel overhead is negligible).
+- `proton.scope(name)` — context manager to annotate regions (warmup, timing, etc.).
+- `proton.finalize()` — flush and write profile data.
+- `proton-viewer` CLI to render `.hatchet` files as trees.
+
+**Known issue**: `mode="pcsampling"` segfaults when non-Triton CUDA kernels (e.g. `torch.gather`) are launched during profiling. This affects the Helion barrier kernel which calls `torch.gather` in stage 2. Workaround: use `--name fused-triton` to profile only the hand-written Triton kernel, or omit `mode="pcsampling"` (loses per-line granularity).
+
+**Pitfall: Proton inflates per-launch overhead.** Proton adds fixed instrumentation cost per kernel launch. When comparing approaches with different numbers of launches (e.g. 1 vs 4), the wall-clock difference under Proton is misleading. For example, the barrier vs two-stage comparison showed a ~5ms gap under Proton that doesn't exist in uninstrumented runs (~0.01ms real overhead). Always cross-reference Proton wall-clock with `speed_test.py --use_proton=False`.
 
 ## Triton benchmark CSV format
 

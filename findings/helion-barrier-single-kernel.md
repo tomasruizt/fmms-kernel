@@ -88,26 +88,94 @@ def fused_sample_helion_kernel(
 
 The Python wrapper simplifies to just calling the kernel and collecting `out_idxs` — no more buffer allocation or host-side reduction.
 
-## Expected benefits
+## Result: barrier version is ~3% slower (RTX 3090, H=1)
 
-| Aspect | Current (2-stage) | With `hl.barrier()` |
-|--------|-------------------|---------------------|
-| Kernel launches per sample | 1 (kernel) + 2 (argmax, gather) | 1 total |
-| Stage 2 data locality | Cold read from DRAM | Hot in L2 cache |
-| Stage 2 cost (V=128K) | ~0.1-0.5ms | ~microseconds |
-| Python wrapper complexity | Buffer alloc + reduction loop | Just call kernel |
+The barrier version was implemented and passes all correctness tests. Rigorous benchmarking shows it is slightly slower at the kernel level, with the host-side overhead it eliminates being negligible in practice.
 
-## Open questions
+### Speed test (25 warmup + 100 runs, no profiling overhead)
 
-1. **Tensor allocation inside kernel**: The split-k example allocates `torch.zeros(...)` inside the kernel body. CLAUDE.md notes a `TensorOperationInWrapper` warning for tensor ops outside `hl.tile` loops. Need to verify whether this is just a warning or blocks compilation.
+RTX 3090, V=128256, D=8192, H=1:
 
-2. **Stage 2 argmax over `:` slice**: The split-k example reduces with `torch.sum(tmp[tile_m, tile_n, :], dim=-1)`. Our stage 2 needs `torch.argmax(tile_maxs[:, tile_h], dim=0)` followed by indexing into `tile_max_idxs`. This is more complex than a simple sum — need to verify Helion generates correct code for this pattern.
+| Version | Median (ms) | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
+|---------|-------------|-----------|----------|----------|----------|
+| Two-stage | 2.32 | 2.32 | 0.036 | 2.31 | 2.67 |
+| Barrier | 2.38 | 2.39 | 0.014 | 2.37 | 2.52 |
 
-3. **`hl.barrier()` version support**: The example is in official Helion docs, but we should confirm the installed version supports it. Check with `python -c "import helion.language as hl; print(hasattr(hl, 'barrier'))"`.
+The barrier kernel is **~3% slower** (2.38ms vs 2.32ms median), but has **lower variance** (std 0.014 vs 0.036).
 
-4. **Interaction with 2D tiling**: Stage 1 tiles both V and H, producing `tile_maxs` indexed by `tile_v.id`. The barrier must wait for all `(V, H)` tiles before stage 2 runs. The split-k example has a 3D stage-1 grid and a 2D stage-2 grid, so mixed grid dimensions across barrier should be fine.
+### NCU kernel analysis
+
+| Metric | Barrier | Two-Stage |
+|--------|---------|-----------|
+| Kernel duration | 2.39ms | 2.31ms |
+| Grid size | 164 blocks | 1,002 blocks |
+| Block size | 512 threads | 64 threads |
+| Registers/thread | 64 | 62 |
+| SM compute throughput | 29.6% | 7.3% |
+| Achieved occupancy | 66.6% | 12.4% |
+| Theoretical occupancy | 66.7% (register-limited) | 12.5% (shared-memory-limited) |
+| Active warps/scheduler | 8.02 | 1.49 |
+| L1 hit rate | 2.2% | 0.7% |
+| L2 hit rate | 1.6% | 0.08% |
+| Top stall reason | CTA barrier (52% of CPI) | L1TEX scoreboard (85% of CPI) |
+| Issue rate | 1 insn every 6.7 cycles | 1 insn every 34.9 cycles |
+
+The barrier kernel uses hardware **much** more efficiently (5.4x occupancy, 4x compute throughput, 5x issue rate). However, it executes 2x more FP32 instructions because 164 persistent blocks each iterate over multiple tiles, vs 1,002 one-shot blocks in the two-stage version. The net effect is a ~3% slower kernel.
+
+The barrier kernel's top stall is CTA barrier sync (52%) — warps finish tile work and wait for siblings. The two-stage kernel is 85% stalled on memory (L1TEX scoreboard) because with only 1.49 active warps, there's nothing to hide memory latency.
+
+### Proton profiling (5 warmup + 20 runs) — beware of artifacts
+
+| Version | Median (ms) | Mean (ms) | Std (ms) | Min (ms) | Max (ms) |
+|---------|-------------|-----------|----------|----------|----------|
+| Two-stage | 30.12 | 30.04 | 1.21 | 27.36 | 32.60 |
+| Barrier | 25.19 | 24.83 | 2.09 | 18.77 | 27.30 |
+
+**The ~5ms proton difference is an instrumentation artifact, not real overhead.** Proton adds fixed overhead per kernel launch and per CUDA operation. The two-stage version launches 4 CUDA kernels (main + fill + argmax + gather) vs 1 for barrier, so it accumulates ~5ms more profiling overhead. The uninstrumented speed test shows the actual host-side overhead is only ~0.01ms (2.32ms wall-clock vs 2.31ms NCU kernel-only for two-stage).
+
+**Lesson learned**: Always cross-reference proton wall-clock times with uninstrumented `speed_test.py` measurements. Proton is useful for relative kernel-internal breakdowns but misleading for comparing approaches with different numbers of kernel launches.
+
+### Why the barrier version is slower
+
+The host-side overhead eliminated by barrier (tensor allocations + 3 auxiliary kernel launches) is **negligible** at H=1 — only ~0.01ms. The barrier version pays more than it saves:
+1. **Cooperative launch constraints**: `num_stages=1` (no software pipelining), `persistent_blocked` scheduling, 164 blocks vs 1,002
+2. **Barrier sync stalls**: 52% of cycles spent waiting at CTA barrier
+3. **2x instruction count**: persistent blocks iterate over multiple tiles
+
+### Tradeoffs
+
+- **Cooperative launch overhead**: Requires `launch_cooperative_grid=True`, constraining all thread blocks to be co-resident. Forces `persistent_blocked` scheduling with fewer blocks (164 vs 1,002) and `num_stages=1`.
+- **Higher occupancy but wasted on sync**: 66.6% occupancy vs 12.4%, but 52% of CPI is barrier stalls. The two-stage version's low occupancy doesn't hurt because the work is purely memory-bound — each block independently streams through its tile.
+- **Lower variance**: std 0.014 vs 0.036, likely from predictable persistent scheduling.
+- **`autotune_ignore_errors=True` required**: Some autotuner configs exceed the cooperative launch block limit, reducing the search space.
+- **Potential at larger H**: The host-side overhead grows with batch size (argmax/gather over `n_tiles x H`). At larger H the barrier version may break even or win.
+
+## Open questions (resolved)
+
+1. **Tensor allocation inside kernel**: Works fine. `torch.full(...)` and `torch.empty(...)` inside the kernel (but outside `hl.tile` loops) compile and run correctly. The `TensorOperationInWrapper` warning fires but does not block compilation.
+
+2. **Stage 2 argmax over `:` slice**: `torch.argmax(tile_maxs[:, tile_h], dim=0)` works. However, advanced indexing with `tile_max_idxs[best_tile, tile_h]` does **not** work — Helion interprets it as a Cartesian product (producing a 2D tensor), not element-wise gather. **Fix**: use `torch.gather(tile_max_idxs[:, tile_h], 0, best_tile.unsqueeze(0)).squeeze(0)` instead.
+
+3. **`hl.barrier()` version support**: Confirmed available via `hasattr(hl, 'barrier')`.
+
+4. **Interaction with 2D tiling**: Works correctly. Stage 1 tiles `(V, H)`, stage 2 tiles `(H)` only. The barrier properly synchronizes all stage-1 tiles before stage-2 runs.
+
+## Profile details
+
+RTX 3090 comparison results checked into `findings/rtx3090-barrier-comparison/`:
+- `{barrier,two-stage}/speed-test.txt` — full speed_test.py output
+- `{barrier,two-stage}/time-distribution.csv` — statistical summary
+- `{barrier,two-stage}/proton/kernel-by-line.txt` — per-line kernel breakdown
+- `{barrier,two-stage}/proton/speed-test.txt` — proton run output
+
+Full NCU reports (`.ncu-rep`) and Proton hatchet files are in `benchmarking/profiles/barrier-comparison/` (gitignored).
+
+**Two-stage kernel config**: `num_stages=2, num_warps=2, pid_type='flat'`, 1002 blocks, `block_sizes=[1, 128]`
+**Barrier kernel config**: `num_stages=1, num_warps=16, pid_type='persistent_blocked'`, 164 blocks, `block_sizes=[1, 128, 1]`
+
+Both are memory-bound: weight matrix loads dominate kernel time (~55% in two-stage, split across `triton_helpers` lines in barrier due to Helion codegen differences).
 
 ## Relevant code
 
-- `src/fused_mm_sampling/helion_impl.py` — current 2-stage implementation
+- `src/fused_mm_sampling/helion_impl.py` — barrier version (current)
 - Helion split-k barrier example: https://helionlang.com/examples/split_k_barrier.html
