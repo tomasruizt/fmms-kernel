@@ -2,6 +2,10 @@
 
 Development notes and lessons learned while building this project.
 
+## Code style
+
+- **Top-down structure**: Define high-level functions first, helpers below. A reader should encounter the main logic before the details it delegates to.
+
 ## Development environment
 
 - Use the `.venv` in the repo root (not system Python). Run tests/scripts with `.venv/bin/python` or `.venv/bin/pytest`.

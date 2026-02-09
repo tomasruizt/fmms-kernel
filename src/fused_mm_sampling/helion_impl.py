@@ -47,7 +47,7 @@ def fused_sample_helion_kernel(
         gumbel_noise = -(-unif_noise.log()).log()
         summed = logits_blk + gumbel_noise
 
-        tile_maxs[tile_v.id, tile_h] = hl.reduce(torch.max, summed, dim=0)
+        tile_maxs[tile_v.id, tile_h] = hl.reduce(torch.max, summed, dim=0, other=float("-inf"))
         # torch.argmax in Helion returns global indices (includes tile offset).
         tile_max_idxs[tile_v.id, tile_h] = torch.argmax(summed, dim=0)
 

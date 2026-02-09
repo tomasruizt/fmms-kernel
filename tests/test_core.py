@@ -3,6 +3,7 @@ from pathlib import Path
 
 os.environ.setdefault("HELION_AUTOTUNE_EFFORT", "none")
 
+import numpy as np
 import pytest
 import torch
 from scipy.stats import chisquare
@@ -48,7 +49,7 @@ def test_bsz_h(args):
 
 
 @pytest.mark.parametrize("n_hidden_states", [1, 2])
-@pytest.mark.parametrize("vocab_size", [100, 256])
+@pytest.mark.parametrize("vocab_size", [100, 200, 256])
 @pytest.mark.parametrize(
     "provider",
     [
@@ -96,6 +97,10 @@ def test_sampling_distribution(provider, vocab_size, n_hidden_states):
         # Rescale expected counts so sums match (samples in excluded bins shift the totals).
         exp = exp * (obs.sum() / exp.sum())
         _, p_value = chisquare(obs, exp)
+        assert not np.isnan(p_value), (
+            f"Chi-squared returned NaN for seq {seq_idx} — likely all samples "
+            f"landed in a single tile. {provider} may have a masked-fill bug."
+        )
         assert p_value > 0.001, (
             f"Sampling distribution mismatch for seq {seq_idx}: p={p_value:.6f}. "
             f"{provider} does not match the expected softmax distribution."
