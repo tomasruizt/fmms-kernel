@@ -10,6 +10,7 @@ Development notes and lessons learned while building this project.
 ## Development environment
 
 - Use the `.venv` in the repo root (not system Python). Run tests/scripts with `.venv/bin/python` or `.venv/bin/pytest`.
+- **Save all learnings in this file (`CLAUDE.md`), not in `~/.claude/` MEMORY.md.** The `~/.claude/` directory is local to the server and will be lost when switching machines. This file is checked into git and travels with the code.
 
 ## Findings
 
@@ -141,3 +142,34 @@ Documentation: https://github.com/triton-lang/triton/tree/main/third_party/proto
 ## Triton benchmark CSV format
 
 Triton's `perf_report` appends ` (Time (ms))` to column names based on `ylabel`. The plotting code strips this suffix via `read_triton_bench_csv()` in `benchmarking/plot-triton-bench.py`.
+
+## vLLM integration
+
+The FMMS sampler is integrated into vLLM on the `feature/fmms-sampler` branch in `~/code/vllm`. Key files:
+
+- `vllm/v1/sample/fmms_sampler.py` — thin wrapper adapting FMMS kernel to vLLM's `SamplerOutput`
+- `vllm/envs.py` — `VLLM_USE_FMMS_SAMPLER` and `VLLM_FMMS_PROVIDER` env vars
+- `vllm/v1/worker/gpu_model_runner.py` — calls `FMMSSampler` in `sample_tokens()` when enabled
+
+### Benchmarking
+
+End-to-end vLLM benchmarks live in `benchmarking/vllm/`. Key files:
+
+- `Makefile` — `make all` (full sweep, 3 runs) and `make quick` (smoke test, 1 run, `--enforce-eager`). Supports `MODEL=` override for different models.
+- `bench-params.json` / `quick-bench-params.json` — sweep parameters (concurrency levels, num_prompts, request_rate)
+- `collect_results.py` — reads `summary.csv` from each variant's latest timestamped run, prints summary table (last run only) and per-run breakdown. Usage: `python collect_results.py <model_dir>`
+- Results are organized as `<model_slug>/baseline/`, `<model_slug>/fmms-triton/`, `<model_slug>/fmms-flashinfer/`
+
+### `.item()` CPU-GPU synchronization bug
+
+`temperature[0].item()` in `fmms_sampler.py` caused a CPU-GPU sync on every decode step. At concurrency 32, TPOT regressed from 9ms to 18ms. Fix: use `temperature[0]` (scalar tensor) instead. This applies broadly — never call `.item()`, `float()`, `.cpu()`, or `print()` on GPU tensors in the hot path.
+
+### Triton autotuning at runtime
+
+The Triton kernel's `@triton.autotune` has `n_hidden_states` in the `key=` parameter. Every unique batch size triggers autotuning (benchmarking all configs). In vLLM, high concurrency produces many unique batch sizes (33, 34, ..., 256), each causing an autotune run **during the benchmark**. This inflated TPOT by 2-10x at concurrency 32+.
+
+**Evidence**: Autotune cache timestamps show H=33 through H=256 were all first tuned during the benchmark run (17:50–18:15). Per-run data confirms: Run 0 at concurrency 32 was 18.3ms (autotuning), Runs 1-2 were 8.6ms (cached).
+
+**How vLLM kernels avoid this**: They never include batch-size-like dimensions in the autotune `key=`. Examples from `ssd_bmm.py`, `chunk_o.py`, `chunk_delta_h.py` all use `key=["H", "K", "V", "BT"]` where H=num_heads (fixed per model), not batch size. Batch size only affects the grid shape.
+
+**Fix needed**: Remove `n_hidden_states` from `key=` in `@triton.autotune`. The `BLOCK_SIZE_H` heuristic already adapts the tile size per invocation. Need to verify that the best config for `BLOCK_SIZE_V`/`BLOCK_SIZE_D` doesn't actually depend on `n_hidden_states`.
