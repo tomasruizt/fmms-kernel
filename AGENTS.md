@@ -22,6 +22,10 @@ The `findings/` directory contains detailed write-ups of bugs, workarounds, and 
 
 ## Helion kernel pitfalls
 
+Helion has an API reference: https://helionlang.com/api/index.html
+
+and also reference examples: https://helionlang.com/examples/index.html
+
 ### `torch.argmax()` returns global indices
 
 Inside a Helion kernel, `torch.argmax(tensor, dim=0)` returns **global** indices, not tile-local ones. The generated Triton code uses `triton_helpers.max_with_index` with the tile's global `indices_0` offset baked in. **Do NOT add `tile_v.begin`** — that double-counts the offset.
