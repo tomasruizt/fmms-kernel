@@ -108,7 +108,24 @@ def paired_bootstrap(
     name_b: str,
     rng: np.random.Generator,
 ):
-    """Paired bootstrap test: is there a significant difference between two variants?"""
+    """Paired bootstrap test: is there a significant difference between two variants?
+
+    Both variants answer the same set of questions, so we use a *paired* test:
+    compute per-question differences diff[i] = A[i] - B[i] (each is +1, -1, or 0),
+    then bootstrap the mean of that difference vector.  This cancels out shared
+    question difficulty — if both variants get the same 150 hard questions wrong
+    and only differ on 3 borderline ones, the paired test sees the tiny signal
+    clearly, while an unpaired test would be swamped by shared noise.
+
+    Concretely:
+    1. Align on shared doc_ids → two boolean arrays of length n.
+    2. diff = A - B.  Observed accuracy gap = mean(diff).
+    3. Draw BOOTSTRAP_N resamples (with replacement) of size n from diff,
+       compute the mean of each → distribution of plausible gaps.
+    4. 95% CI = 2.5th / 97.5th percentiles of bootstrap means.
+    5. Two-sided p-value = 2 * fraction of bootstrap means with opposite sign
+       to the observed gap (clamped to 1.0).
+    """
     shared_ids = sorted(set(results_a) & set(results_b))
     if not shared_ids:
         print(f"No shared doc_ids between {name_a} and {name_b}")
