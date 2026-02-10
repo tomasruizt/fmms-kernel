@@ -177,14 +177,92 @@ softmax + cumsum for top-p.
 The fusion benefit is that the full logit matrix is still never materialized;
 only `num_tiles × k × H` intermediate values are stored.
 
+## Implementation language: Triton vs CUDA C++
+
+### What CUDA C++ enables
+
+The top-k/top-p parts of the kernel need primitives that Triton doesn't
+expose:
+
+- **`BlockRadixSort`** (CUB/CCCL) — partial or full radix sort within a
+  thread block. O(n) for fixed-width keys. This is what FlashInfer uses
+  internally.
+- **`BlockScan`** — prefix sum (cumulative sum) for top-p thresholding.
+- **`BlockReduce`** — reductions with custom operators.
+- **Shared memory control** — maintain a min-heap of size k across tile
+  iterations. In Triton, shared memory is implicit and can't persist
+  structured data across loop iterations the same way.
+- **Warp-level primitives** — `__shfl_sync` for small-k merge steps.
+
+In Triton, `tl.sort` is bitonic sort (full sort, O(n log²n)). There is no
+partial sort, no selection, and no built-in scan/prefix-sum.
+
+### CUTLASS epilogue approach
+
+The architecturally cleanest CUDA path uses CUTLASS for the matmul with a
+**custom epilogue** that performs top-k selection on each output tile while
+it's still in registers:
+
+```
+┌─────────────────────────────────────┐
+│  CUTLASS GEMM: W[V_tile, D] × H^T  │
+│           ↓ (tile in registers)     │
+│  Epilogue: scale by 1/temperature   │
+│           ↓                         │
+│  Epilogue: BlockRadixSort, keep     │
+│            top-k values + indices   │
+│           ↓                         │
+│  Write k candidates to global mem   │
+└─────────────────────────────────────┘
+         ↓ (num_tiles × k × H)
+┌─────────────────────────────────────┐
+│  Kernel 2: merge top-k lists        │
+│  → softmax on k candidates          │
+│  → BlockScan for cumsum (top-p)     │
+│  → sample from survivors            │
+└─────────────────────────────────────┘
+```
+
+- Kernel 1: standard CUTLASS GEMM + custom epilogue. The matmul stays at peak
+  efficiency; the epilogue does local top-k on tile data already in registers.
+- Kernel 2: operates on only `num_tiles × k` elements per sequence — trivially
+  fast. CUB's `BlockScan` handles the cumsum for top-p natively.
+- Full logit matrix is never materialized.
+
+### Tradeoffs
+
+| Aspect             | Triton                       | CUDA C++ (CUTLASS)              |
+|--------------------|------------------------------|---------------------------------|
+| Matmul quality     | Good (auto tensor cores)     | Excellent (CUTLASS)             |
+| Top-k in tile      | `tl.sort` full bitonic sort  | `BlockRadixSort` partial sort   |
+| Top-p cumsum       | No primitive, manual         | `BlockScan`                     |
+| Development time   | Days                         | Weeks to months                 |
+| Debugging          | Python-level, print-friendly | NSight, printf, painful         |
+| Portability        | AMD + NVIDIA                 | NVIDIA only (CUTLASS)           |
+| Maintainability    | ~100 lines                   | ~500+ lines, templates          |
+| Autotuning         | `@triton.autotune` built-in  | Manual or CuTe tuning           |
+
+### Pragmatic middle ground
+
+Keep the Triton kernel for the matmul, extend it to output local top-k per
+tile (using `tl.sort` + slice — not optimal but functional), and write a small
+CUDA C++ kernel only for the merge + top-p + sample step where CUB primitives
+shine. This gets ~90% of the benefit without rewriting the matmul.
+
 ## Summary
 
-| Strategy   | Fusible? | Difficulty | Notes                                              |
-|------------|----------|------------|----------------------------------------------------|
-| **Top-k**  | Yes      | Medium     | Local top-k per tile + merge. `tl.sort` on tiles.  |
-| **Top-p**  | No       | —          | Requires global softmax + sorted cumsum.           |
-| **Top-k + top-p** | Partially | Medium | Fuse top-k, apply top-p on k survivors post-kernel. |
-| **Min-p**  | No       | —          | Needs global max logit as threshold reference.     |
+| Strategy       | Fusible?  | Difficulty | Notes                                             |
+|----------------|-----------|------------|---------------------------------------------------|
+| **Top-k**      | Yes       | Medium     | Local top-k per tile + merge. `tl.sort` on tiles. |
+| **Top-p**      | No        | —          | Requires global softmax + sorted cumsum.          |
+| **Top-k+top-p**| Partially | Medium     | Fuse top-k, apply top-p on k survivors post-kernel.|
+| **Min-p**      | No        | —          | Needs global max logit as threshold reference.    |
+
+| Language         | Best for                          | Limitation                      |
+|------------------|-----------------------------------|---------------------------------|
+| **Triton**       | Matmul + local top-k (tile sort)  | No partial sort, no scan        |
+| **CUDA/CUTLASS** | Full pipeline (matmul + top-k + top-p) | High dev cost, NVIDIA only |
+| **Hybrid**       | Triton matmul + CUDA top-p kernel | Best effort/benefit ratio       |
 
 The dominant cost in all cases is the matmul, which is unchanged. The overhead
 of within-tile top-k and the merge reduction is small for practical k values
