@@ -166,10 +166,6 @@ End-to-end vLLM benchmarks live in `benchmarking/vllm/`. Key files:
 
 ### Triton autotuning at runtime
 
-The Triton kernel's `@triton.autotune` has `n_hidden_states` in the `key=` parameter. Every unique batch size triggers autotuning (benchmarking all configs). In vLLM, high concurrency produces many unique batch sizes (33, 34, ..., 256), each causing an autotune run **during the benchmark**. This inflated TPOT by 2-10x at concurrency 32+.
+The Triton kernel's `@triton.autotune` originally had `n_hidden_states` in its `key=` parameter. Every unique batch size triggered autotuning (benchmarking all configs). In vLLM, high concurrency produces many unique batch sizes (33, 34, ..., 256), each causing an autotune run **during the benchmark**. This inflated TPOT by 2-10x at concurrency 32+.
 
-**Evidence**: Autotune cache timestamps show H=33 through H=256 were all first tuned during the benchmark run (17:50–18:15). Per-run data confirms: Run 0 at concurrency 32 was 18.3ms (autotuning), Runs 1-2 were 8.6ms (cached).
-
-**How vLLM kernels avoid this**: They never include batch-size-like dimensions in the autotune `key=`. Examples from `ssd_bmm.py`, `chunk_o.py`, `chunk_delta_h.py` all use `key=["H", "K", "V", "BT"]` where H=num_heads (fixed per model), not batch size. Batch size only affects the grid shape.
-
-**Fix needed**: Remove `n_hidden_states` from `key=` in `@triton.autotune`. The `BLOCK_SIZE_H` heuristic already adapts the tile size per invocation. Need to verify that the best config for `BLOCK_SIZE_V`/`BLOCK_SIZE_D` doesn't actually depend on `n_hidden_states`.
+**Fix applied**: Replaced `n_hidden_states` with `BLOCK_SIZE_H` in the autotune `key=`, and changed `n_hidden_states` from `tl.constexpr` to a regular runtime int in the kernel signature. `BLOCK_SIZE_H` has only 3 possible values (16, 32, 64), so autotuning runs at most 3 times per (V, D) combination instead of once per unique batch size. All three uses of `n_hidden_states` inside the kernel (`tl.cdiv`, comparison, arithmetic) work fine with runtime values.

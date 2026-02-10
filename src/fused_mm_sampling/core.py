@@ -218,7 +218,7 @@ def unpack_grid(grid):
         for maxnreg in [128]  # Previously 255, not sure either is better
         for num_stages in [4]  # 4 outpeforms 2, and 3
     ],
-    key=["vocab_size", "hidden_size", "n_hidden_states", "num_samples", "GUMBEL"],
+    key=["vocab_size", "hidden_size", "BLOCK_SIZE_H", "num_samples", "GUMBEL"],
     cache_results=True,
 )
 @triton.heuristics(values={"BLOCK_SIZE_H": lambda args: bsz_h(args["n_hidden_states"])})
@@ -230,7 +230,7 @@ def fused_mm_sample_triton_kernel(
     max_out_idx_ptr,  # [grid_size, n_hidden_states, num_samples]
     vocab_size,  # V
     hidden_size: tl.constexpr,  # D
-    n_hidden_states: tl.constexpr,
+    n_hidden_states: int,
     num_samples: tl.constexpr,
     temperature_ptr,  # scalar (0-d tensor)
     seed: int,

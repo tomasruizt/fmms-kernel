@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../vllm"
+		}
+	],
+	"settings": {
+		"makefile.configureOnOpen": false
+	}
+}
