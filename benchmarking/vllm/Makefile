@@ -27,7 +27,44 @@ define collect
 	$(PYTHON) "$(RESULTS_DIR)/collect_results.py" "$(MODEL_DIR)" | tee "$(MODEL_DIR)/results.txt"
 endef
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer
+LM_EVAL := $(VLLM_DIR)/venv/bin/lm_eval
+EVAL_TASK := gsm8k_cot_zeroshot
+EVAL_MAX_MODEL_LEN := 32768
+EVAL_DIR := $(RESULTS_DIR)/eval
+JUDGE_DIRS := $(EVAL_DIR)/baseline $(EVAL_DIR)/baseline-fmms-params $(EVAL_DIR)/fmms-triton
+# Qwen3-1.7B generation_config.json defaults + enough tokens for thinking chains:
+EVAL_GEN_KWARGS := temperature=0.6 top_p=0.95 top_k=20 max_tokens=16384
+# FMMS-compatible params (no top-k/top-p filtering):
+EVAL_GEN_KWARGS_FMMS := temperature=0.6 top_p=1.0 top_k=-1 max_tokens=16384
+
+# Usage: $(call run_eval,<env_prefix>,<output_subdir>,<gen_kwargs>)
+# Starts vLLM in background, runs lm_eval, saves results, kills vLLM.
+# If gen_kwargs (3) is omitted, defaults to EVAL_GEN_KWARGS.
+define run_eval
+	mkdir -p "$(EVAL_DIR)/$(2)"
+	$(1) $(VLLM) serve $(MODEL) --max-model-len $(EVAL_MAX_MODEL_LEN) --no-enable-prefix-caching --uvicorn-log-level warning --reasoning-parser qwen3 \
+		> "$(EVAL_DIR)/$(2)/vllm.log" 2>&1 & \
+	VLLM_PID=$$!; \
+	echo "Waiting for vLLM server (PID $$VLLM_PID)..."; \
+	for i in $$(seq 1 120); do \
+		curl -sf http://localhost:8000/health > /dev/null 2>&1 && break; \
+		sleep 1; \
+	done; \
+	$(LM_EVAL) \
+		--model local-chat-completions \
+		--model_args model=$(MODEL),base_url=http://localhost:8000/v1/chat/completions,num_concurrent=32,max_retries=3,tokenized_requests=False \
+		--apply_chat_template \
+		--tasks $(EVAL_TASK) \
+		--gen_kwargs $(if $(3),$(3),$(EVAL_GEN_KWARGS)) \
+		--log_samples \
+		--output_path "$(EVAL_DIR)/$(2)" \
+		2>&1 | tee "$(EVAL_DIR)/$(2)/lm_eval.log"; \
+	STATUS=$$?; \
+	kill $$VLLM_PID 2>/dev/null; wait $$VLLM_PID 2>/dev/null; \
+	exit $$STATUS
+endef
+
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge
 
 $(MODEL_DIR):
 	mkdir -p "$@"
@@ -93,3 +130,18 @@ quick-fmms-flashinfer:
 		-o "$(MODEL_DIR)/fmms-flashinfer" \
 		2>&1 | tee "$(MODEL_DIR)/fmms-flashinfer.tmp"
 	$(call move_log,$(MODEL_DIR)/fmms-flashinfer,$(MODEL_DIR)/fmms-flashinfer)
+
+eval-baseline:
+	$(call run_eval,env,baseline)
+	$(PYTHON) "$(RESULTS_DIR)/judge_eval.py" "$(EVAL_DIR)/baseline"
+
+eval-baseline-fmms-params:
+	$(call run_eval,env,baseline-fmms-params,$(EVAL_GEN_KWARGS_FMMS))
+	$(PYTHON) "$(RESULTS_DIR)/judge_eval.py" "$(EVAL_DIR)/baseline-fmms-params"
+
+eval-fmms-triton:
+	$(call run_eval,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton,$(EVAL_GEN_KWARGS_FMMS))
+	$(PYTHON) "$(RESULTS_DIR)/judge_eval.py" "$(EVAL_DIR)/fmms-triton"
+
+judge:
+	$(PYTHON) "$(RESULTS_DIR)/judge_eval.py" $(JUDGE_DIRS)

@@ -61,6 +61,30 @@ def read_triton_bench_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def plot_relative_performance_from_wide(
+    bdf: pd.DataFrame,
+    ref_method: str,
+    ref_slug: str,
+    case: str,
+    plot_folder: Path,
+    csv_folder: Path,
+):
+    """Compute relative performance vs ref_method and save plot + CSV."""
+    methods = [c for c in bdf.columns if c != ref_method and c != "n_hidden_states"]
+    bdf_rel = bdf.copy()
+    bdf_rel[[*methods, ref_method]] = bdf[[*methods, ref_method]].div(bdf[ref_method], axis=0)
+    bdf_rel_long = bdf_rel.melt(
+        id_vars=["n_hidden_states"], var_name="provider", value_name="relative-time"
+    )
+    bdf_rel_long["relative-perf"] = 1 / bdf_rel_long["relative-time"]
+    bdf_rel_long.round(3).to_csv(
+        csv_folder / f"relative-performance-vs-{ref_slug}-{case}.csv", index=False
+    )
+    ax = plot_relative_performance(bdf_rel_long, ref_method)
+    ax.figure.savefig(plot_folder / f"relative-performance-vs-{ref_slug}-{case}.png", dpi=300)
+    return ax
+
+
 def create_and_triton_bench_plots(folder: Path):
     tgt_folder = folder / "custom-plots"
     tgt_folder.mkdir(parents=True, exist_ok=True)
@@ -78,18 +102,17 @@ def create_and_triton_bench_plots(folder: Path):
         ax.figure.savefig(tgt_folder / f"batch-scaling-{case}.png", dpi=300)
         plt.close(ax.figure)
 
-        ref_method = "flashinfer:sampling_from_logits"
-        methods = [c for c in bdf.columns if c != ref_method and c != "n_hidden_states"]
-        bdf_rel = bdf.copy()
-        bdf_rel[[*methods, ref_method]] = bdf[[*methods, ref_method]].div(bdf[ref_method], axis=0)
-        bdf_rel_long = bdf_rel.melt(
-            id_vars=["n_hidden_states"], var_name="provider", value_name="relative-time"
-        )
-        bdf_rel_long["relative-perf"] = 1 / bdf_rel_long["relative-time"]
-        bdf_rel_long.round(3).to_csv(folder / f"relative-performance-{case}.csv", index=False)
-        ax = plot_relative_performance(bdf_rel_long, ref_method)
-        ax.figure.savefig(tgt_folder / f"relative-performance-{case}.png", dpi=300)
-        plt.close(ax.figure)
+        ref_methods = {
+            "flashinfer1": "flashinfer:sampling_from_logits",
+            "flashinfer2": "flashinfer:top_k_top_p_sampling_from_logits",
+        }
+        for ref_slug, ref_method in ref_methods.items():
+            if ref_method not in bdf.columns:
+                continue
+            ax = plot_relative_performance_from_wide(
+                bdf, ref_method, ref_slug, case, tgt_folder, folder
+            )
+            plt.close(ax.figure)
 
 
 class Args(BaseSettings, cli_parse_args=True):
