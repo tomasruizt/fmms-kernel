@@ -28,6 +28,7 @@ TEMPERATURE = 1.0
 
 
 ALL_CASES = list(BENCHMARK_CASES.keys())
+DEFAULT_CASES = ["large", "small"]
 
 
 class Args(BaseSettings):
@@ -44,7 +45,7 @@ class CliArgs(Args, cli_parse_args=True):
 provider_names = {
     "fused-triton": "FMMS (Triton)",
     "fused-triton-no-gumbel": "FMMS (Triton NoNoise)",
-    "helion": "FMMS (Helion)",
+    # "helion": "FMMS (Helion)",  # autotuning too slow atm. It runs on every bsz change
     "naive-compiled": "Naive PyTorch Compiled",
     # "sequential-compiled": "Sequential PyTorch Compiled",
     # "naive-tl-matmul": "Naive Triton Matmul",
@@ -129,7 +130,7 @@ def _run_benchmark(hidden_states: torch.Tensor, weights: torch.Tensor, provider:
 
 def _resolve_cases(case: str) -> list[str]:
     if case == "all":
-        return ALL_CASES
+        return DEFAULT_CASES
     if case not in BENCHMARK_CASES:
         raise ValueError(f"Unknown case: {case!r}. Choose from: {ALL_CASES + ['all']}")
     return [case]
