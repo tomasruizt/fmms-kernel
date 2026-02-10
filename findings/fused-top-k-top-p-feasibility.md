@@ -13,7 +13,7 @@ However, the kernel currently only supports vanilla categorical sampling
 **top-p** (nucleus) sampling. This document analyzes whether these can be
 fused into the kernel.
 
-## Inspiration: FlashInfer's rejection sampling
+## FlashInfer's rejection sampling
 
 FlashInfer ([blog post](https://flashinfer.ai/2025/03/10/sampling.html))
 replaces sorting-based top-k/top-p with **rejection sampling**:
@@ -28,6 +28,66 @@ full sorting and multiple kernel launches.
 **Key limitation for fusion:** each rejection round scans the full probability
 distribution. In a fused kernel that would mean re-running the matmul per
 round — a non-starter. FlashInfer's approach operates on pre-computed logits.
+
+### `filter_apply_order`: sequential vs joint
+
+`top_k_top_p_sampling_from_logits` in
+`.venv/.../flashinfer/sampling.py` (lines 1127–1154) supports two strategies
+via the `filter_apply_order` parameter:
+
+**`"top_k_first"` (default):** sequential — three kernel launches.
+
+```python
+masked_logits = top_k_mask_logits(logits, top_k)   # 1. mask all but top-k
+probs = torch.softmax(masked_logits, dim=-1)        # 2. softmax on survivors
+return top_p_sampling_from_probs(probs, top_p, ...)  # 3. rejection-sample with top-p
+```
+
+Top-p is evaluated on the **renormalized** distribution after top-k filtering.
+
+**`"joint"`:** single fused CUDA kernel (`TopKTopPSamplingFromProbKernel` in
+`sampling.cuh`, ~line 1199). Uses dual-pivot binary search rejection sampling
+and accepts a candidate only when **both** constraints are satisfied
+simultaneously on the **original** distribution:
+
+```cpp
+if (aggregate_gt_pivot_0.count < k && aggregate_gt_pivot_0.value < p) {
+    break;  // accept: both top-k and top-p satisfied jointly
+}
+```
+
+### Sequential vs joint: when results differ
+
+The two strategies can produce different candidate sets because renormalization
+after top-k inflates surviving tokens' probabilities.
+
+**Example:** 5 tokens, top_k=3, top_p=0.35
+
+| Token | Original prob |
+|-------|---------------|
+| A     | 0.30          |
+| B     | 0.25          |
+| C     | 0.24          |
+| D     | 0.11          |
+| E     | 0.10          |
+
+**Sequential** (top-k first):
+
+1. Top-k=3: keep {A=0.30, B=0.25, C=0.24}, discard D, E.
+2. Renormalize: A=0.380, B=0.316, C=0.304.
+3. Top-p=0.35: cumsum A=0.380 ≥ 0.35 → only **{A}** survives.
+   Result: deterministic.
+
+**Joint** (both at once on original probs):
+
+- Top-p=0.35: cumsum A=0.30 < 0.35, A+B=0.55 ≥ 0.35 → **{A, B}**.
+- Top-k=3: {A, B, C}.
+- Intersection: **{A, B}**.
+  Result: still stochastic.
+
+Renormalization inflated A from 0.30 to 0.38, crossing the 0.35 threshold
+alone. On the original distribution A doesn't reach 0.35, so B is also needed.
+In general, **sequential can produce a smaller candidate set** than joint.
 
 ## Top-k: feasible via tile-local top-k + merge
 
@@ -106,10 +166,16 @@ The most practical path for supporting both:
 2. **Apply top-p on the k survivors** outside the kernel. On 256 elements,
    softmax + sort + cumsum + resample is trivially fast.
 
-This is effectively what most inference frameworks already do — vLLM applies
-top-k first, then top-p on the filtered set. The fusion benefit is that the
-full logit matrix is still never materialized; only `num_tiles × k × H`
-intermediate values are stored.
+This mirrors how vLLM combines the two filters. vLLM's FlashInfer path
+(`vllm/v1/sample/ops/topk_topp_sampler.py`, line 377) calls
+`flashinfer.sampling.top_k_top_p_sampling_from_logits(logits, k, p)` without
+passing `filter_apply_order=`, so it uses the default `"top_k_first"`
+(sequential). vLLM's native PyTorch path (`apply_top_k_top_p()`, lines
+243–283) also applies top-k first: sort once, mask by k-th value, then
+softmax + cumsum for top-p.
+
+The fusion benefit is that the full logit matrix is still never materialized;
+only `num_tiles × k × H` intermediate values are stored.
 
 ## Summary
 
