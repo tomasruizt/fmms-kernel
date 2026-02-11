@@ -253,6 +253,38 @@ Output: `benchmarking/vllm/profiles/nsight/<GPU>/<model_slug>/`.
 - **`sudo -E` is required** to pass environment variables (like `VLLM_USE_FMMS_SAMPLER`, `VLLM_NVTX_SCOPES_FOR_PROFILING`) through to the vllm process. Without `-E`, the FMMS sampler won't activate.
 - **`setsid`** is used to put nsys in its own session, so the kill signal doesn't propagate back to the make process.
 
+## Modal benchmarking (triton-bench)
+
+Kernel microbenchmarks run on Modal cloud GPUs. The root `Makefile` has a three-step pipeline:
+
+```bash
+# Full pipeline: run bench → download results → plot
+make modal-triton-benchmark GPU=h100!
+
+# Or run steps individually:
+make modal-create-results-triton-bench GPU=h100!   # runs on Modal, saves logs
+make modal-get-results-triton-bench GPU=h100!      # downloads from Modal volume
+make modal-plot-triton-bench GPU=h100!             # generates plots from CSVs
+```
+
+**GPU options**: `h100!`, `h100`, `a100-80gb`, `b200`, `h200` (the `!` suffix means dedicated/reserved GPU on Modal). Default is `b200`.
+
+**Benchmark cases**: Controlled by `CASE` env var (default `"all"` → runs `["large", "small"]`). Available cases in `src/fused_mm_sampling/bench/triton_benchmark.py`:
+- `large`: V=128,256, d=8,192 (Llama 3 70B)
+- `small`: V=128,256, d=4,096 (Llama 3 8B)
+- `qwen3-1.7b`: V=151,936, d=2,048
+- `gpt-oss-120b`: V=201,088, d=2,880
+
+**POSTFIX**: Use `POSTFIX=-foo` to create separate result directories for A/B comparisons without overwriting previous runs: `make modal-triton-benchmark GPU=h100! POSTFIX=-experiment1`.
+
+**Key files**:
+- `src/fused_mm_sampling/modal_lib/modal_triton_benchmark.py` — Modal app definition
+- `src/fused_mm_sampling/modal_lib/utils.py` — image (PyTorch 2.9.1 + CUDA 12.8), volume config
+- `src/fused_mm_sampling/bench/triton_benchmark.py` — benchmark runner, `Args` dataclass, `BENCHMARK_CASES`
+- `benchmarking/plot-triton-bench.py` — plotting script
+
+**Results location**: `benchmarking/modal-results/triton-bench-{GPU}{POSTFIX}/` containing CSVs, plots in `custom-plots/`, and `logs.txt`.
+
 ## Triton benchmark CSV format
 
 Triton's `perf_report` appends ` (Time (ms))` to column names based on `ylabel`. The plotting code strips this suffix via `read_triton_bench_csv()` in `benchmarking/plot-triton-bench.py`.
