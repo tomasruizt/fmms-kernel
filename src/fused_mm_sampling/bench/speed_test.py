@@ -84,8 +84,8 @@ class Case:
 
 all_providers = [
     "fused-triton",
-    "fused-cuda",
-    "helion",
+    # "fused-cuda",
+    # "helion",
     "naive-compiled",
     # "sequential-compiled",
     # "naive-tl-matmul",

@@ -127,10 +127,11 @@ ncu-export-helion:
 ncu-export-all: ncu-export-fused-triton ncu-export-naive-compiled ncu-export-flashinfer ncu-export-naive-tl-matmul
 	@echo "NCU reports exported to profiles/ncu-txt/"
 
+CASE:=all
 triton-benchmark:
 	@if [ -d profiles/triton-bench/ ]; then rm -rf profiles/triton-bench/; fi
 	mkdir -p profiles/triton-bench
-	PYTHONUNBUFFERED=1 $(PYTHON) triton_benchmark.py --tgt_dir profiles/triton-bench/ 2>&1 | tee profiles/triton-bench/logs.txt
+	PYTHONUNBUFFERED=1 $(PYTHON) triton_benchmark.py --tgt_dir profiles/triton-bench/ --case $(CASE) 2>&1 | tee profiles/triton-bench/logs.txt
 	$(PYTHON) plot-triton-bench.py
 
 clean-triton-autotunes:

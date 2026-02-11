@@ -21,6 +21,7 @@ BENCHMARK_CASES = {
     "qwen3-1.7b": {"vocab_size": 151_936, "hidden_size": 2_048},  # Qwen3 1.7B
     "small": {"vocab_size": 128_256, "hidden_size": 4_096},  # Llama 3 8B, Qwen3 8B
     "large": {"vocab_size": 128_256, "hidden_size": 8_192},  # Llama 3 70B, DeepSeek V3
+    "gpt-oss-120b": {"vocab_size": 201_088, "hidden_size": 2_880},  # GPT-OSS 120B
 }
 
 N_SAMPLES = 1
@@ -44,8 +45,8 @@ class CliArgs(Args, cli_parse_args=True):
 
 provider_names = {
     "fused-triton": "FMMS (Triton)",
-    "fused-cuda": "FMMS (CUDA)",
-    "fused-triton-no-gumbel": "FMMS (Triton NoNoise)",
+    # "fused-cuda": "FMMS (CUDA)",
+    # "fused-triton-no-gumbel": "FMMS (Triton NoNoise)",
     # "helion": "FMMS (Helion)",  # autotuning too slow atm. It runs on every bsz change
     "naive-compiled": "Naive PyTorch Compiled",
     # "sequential-compiled": "Sequential PyTorch Compiled",
