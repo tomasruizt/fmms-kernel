@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 from pydantic_settings import BaseSettings
@@ -33,6 +34,18 @@ GPU_PEAK_BW_GBS: dict[str, float] = {
     "NVIDIA L4": 300,
     # https://www.techpowerup.com/gpu-specs/geforce-rtx-3090.c3622
     "NVIDIA GeForce RTX 3090": 936,
+}
+
+# Peak BF16 dense tensor core TFLOP/s per GPU.
+GPU_PEAK_COMPUTE_TFLOPS: dict[str, float] = {
+    "NVIDIA H100 80GB HBM3": 989,
+    "NVIDIA H200": 989,
+    "NVIDIA A100-SXM4-80GB": 312,
+    # https://www.civo.com/blog/comparing-nvidia-b200-and-h100
+    "NVIDIA B200": 2250,
+    "NVIDIA B300 SXM6 AC": 2250,
+    "NVIDIA L4": 121,
+    "NVIDIA GeForce RTX 3090": 142,
 }
 
 
@@ -106,6 +119,11 @@ def model_bytes(vocab_size: int, hidden_size: int, n_hidden_states: float) -> fl
     )
 
 
+def model_flops(vocab_size: int, hidden_size: int, n_hidden_states: float) -> float:
+    """FLOPs for the fused matmul: 2 * V * D * H."""
+    return 2 * vocab_size * hidden_size * int(n_hidden_states)
+
+
 def assign_col_mem_throughput(df: pd.DataFrame, vocab_size: int, hidden_size: int) -> pd.DataFrame:
     """Add a 'mem_throughput[GB/s]' column: model_bytes / kernel_time."""
     nbytes = df["n_hidden_states"].apply(lambda h: model_bytes(vocab_size, hidden_size, h))
@@ -159,6 +177,80 @@ def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = N
     return ax
 
 
+def plot_roofline(
+    bdf_long: pd.DataFrame,
+    vocab_size: int,
+    hidden_size: int,
+    peak_bw_gbs: float,
+    peak_compute_tflops: float,
+):
+    """Classic roofline plot: achieved TFLOP/s vs arithmetic intensity (FLOP/byte)."""
+    df = bdf_long.copy()
+    df["flops"] = df["n_hidden_states"].apply(lambda h: model_flops(vocab_size, hidden_size, h))
+    df["bytes"] = df["n_hidden_states"].apply(lambda h: model_bytes(vocab_size, hidden_size, h))
+    df["ai"] = df["flops"] / df["bytes"]  # arithmetic intensity (FLOP/byte)
+    df["achieved_tflops"] = df["flops"] / (df["time[ms]"] / 1000) / 1e12
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # Roofline ceiling
+    ridge_ai = peak_compute_tflops / (peak_bw_gbs / 1000)  # TFLOP/s / (TB/s) = FLOP/byte
+    ai_min = df["ai"].min() * 0.5
+    ai_max = max(df["ai"].max() * 2, ridge_ai * 2)
+    ai_range = np.geomspace(ai_min, ai_max, 200)
+    mem_ceiling = peak_bw_gbs / 1000 * ai_range  # TB/s * FLOP/byte = TFLOP/s
+    compute_ceiling = np.full_like(ai_range, peak_compute_tflops)
+    roofline = np.minimum(mem_ceiling, compute_ceiling)
+    ax.plot(ai_range, roofline, color="black", linewidth=2, label="Roofline", zorder=1)
+
+    # Ridge point annotation
+    ax.axvline(ridge_ai, color="gray", linestyle=":", linewidth=0.8, alpha=0.6)
+    ax.annotate(
+        f"Ridge: AI={ridge_ai:.0f}",
+        xy=(ridge_ai, peak_compute_tflops),
+        xytext=(ridge_ai * 1.3, peak_compute_tflops * 0.7),
+        fontsize=10,
+        color="gray",
+        arrowprops=dict(arrowstyle="->", color="gray", lw=0.8),
+    )
+
+    # Data points per provider
+    providers = df["provider"].unique()
+    palette = sns.color_palette(n_colors=len(providers))
+    for idx, (color, provider) in enumerate(zip(palette, providers)):
+        pdf = df[df["provider"] == provider]
+        ax.plot(
+            pdf["ai"],
+            pdf["achieved_tflops"],
+            marker="o",
+            label=provider,
+            color=color,
+            zorder=3,
+        )
+        # Annotate each point with H value
+        # but only on the last provider
+        if idx == len(providers) - 1:
+            for _, row in pdf.iterrows():
+                ax.annotate(
+                    f"bsz={int(row['n_hidden_states'])}",
+                    xy=(row["ai"], row["achieved_tflops"]),
+                    xytext=(5, -10),
+                    textcoords="offset points",
+                    fontsize=10,
+                    color=color,
+                )
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Arithmetic Intensity (FLOP/byte)")
+    ax.set_ylabel("Achieved Performance (TFLOP/s)")
+    ax.minorticks_off()
+    ax.grid(True, alpha=0.3, which="both")
+    ax.legend(loc="lower right", fontsize=8)
+    fig.tight_layout()
+    return ax
+
+
 def assign_col_samples_per_ms(df: pd.DataFrame) -> pd.DataFrame:
     return df.assign(**{"samples/ms": lambda df: df["n_hidden_states"] / df["time[ms]"]})
 
@@ -203,8 +295,11 @@ def create_and_triton_bench_plots(folder: Path):
 
     gpu_name = read_gpu_name(folder)
     peak_bw_gbs = GPU_PEAK_BW_GBS.get(gpu_name) if gpu_name else None
+    peak_compute_tflops = GPU_PEAK_COMPUTE_TFLOPS.get(gpu_name) if gpu_name else None
     if gpu_name:
-        print(f"GPU: {gpu_name} → peak HBM BW: {peak_bw_gbs} GB/s")
+        print(
+            f"GPU: {gpu_name} → peak HBM BW: {peak_bw_gbs} GB/s, peak compute: {peak_compute_tflops} TFLOP/s"
+        )
     else:
         print("Warning: could not detect GPU from logs.txt, skipping peak BW line")
 
@@ -232,6 +327,17 @@ def create_and_triton_bench_plots(folder: Path):
                 tgt_folder / f"memory-throughput-{case}.png", dpi=300, bbox_inches="tight"
             )
             plt.close(ax.figure)
+
+            if peak_bw_gbs is not None and peak_compute_tflops is not None:
+                ax = plot_roofline(
+                    bdf_long,
+                    cfg["vocab_size"],
+                    cfg["hidden_size"],
+                    peak_bw_gbs,
+                    peak_compute_tflops,
+                )
+                ax.figure.savefig(tgt_folder / f"roofline-{case}.png", dpi=300, bbox_inches="tight")
+                plt.close(ax.figure)
 
         FMMS = "FMMS (Triton)"  # noqa: N806
         NAIVE = "Naive PyTorch Compiled"  # noqa: N806
