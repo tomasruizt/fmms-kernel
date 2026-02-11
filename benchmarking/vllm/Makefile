@@ -64,7 +64,70 @@ define run_eval
 	exit $$STATUS
 endef
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge
+# --- nsys profiling ---
+# Profiles vLLM decode steps under nsys. Uses cudaProfilerApi capture range so
+# nsys only records between /start_profile and /stop_profile, skipping model
+# load, warmup, and CUDA graph capture.
+NSYS := $(shell which nsys)
+GPU := H100
+NSYS_DIR := $(RESULTS_DIR)/profiles/nsight/$(GPU)/$(MODEL_SLUG)
+NSYS_MAX_TOKENS := 10
+NSYS_PROMPT := What is 2+2?
+
+# Usage: $(call run_nsys,<env_prefix>,<output_name>)
+# 1. Start vLLM under nsys with cudaProfilerApi capture.
+# 2. Wait for /health.
+# 3. Send a warmup request (fills CUDA graphs, JIT caches).
+# 4. /start_profile  →  single request (NSYS_MAX_TOKENS tokens)  →  /stop_profile.
+# 5. Kill the server. Profile saved to NSYS_DIR/<output_name>.nsys-rep.
+define run_nsys
+	mkdir -p "$(NSYS_DIR)"
+	$(1) VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
+	    sudo -E $(NSYS) profile \
+	        --capture-range=cudaProfilerApi --capture-range-end=stop \
+	        --force-overwrite true \
+	        -o "$(NSYS_DIR)/$(2)" \
+	        $(VLLM) serve $(MODEL) $(SERVE_FLAGS) \
+	            --profiler-config.profiler=cuda \
+	        > "$(NSYS_DIR)/$(2)-server.log" 2>&1 & \
+	NSYS_PID=$$!; \
+	echo "Waiting for vLLM under nsys (PID $$NSYS_PID)..."; \
+	for i in $$(seq 1 180); do \
+	    curl -sf http://localhost:8000/health > /dev/null 2>&1 && break; \
+	    sleep 1; \
+	done; \
+	echo "Warmup request..."; \
+	curl -s http://localhost:8000/v1/chat/completions \
+	    -H "Content-Type: application/json" \
+	    -d '{"model":"$(MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6}' \
+	    > /dev/null; \
+	echo "Starting profile..."; \
+	curl -s -X POST http://localhost:8000/start_profile; \
+	curl -s http://localhost:8000/v1/chat/completions \
+	    -H "Content-Type: application/json" \
+	    -d '{"model":"$(MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6}' \
+	    | tee "$(NSYS_DIR)/$(2)-response.json"; \
+	echo; \
+	curl -s -X POST http://localhost:8000/stop_profile; \
+	echo "Stopping server..."; \
+	sleep 2; \
+	sudo kill $$NSYS_PID 2>/dev/null; wait $$NSYS_PID 2>/dev/null; \
+	echo "Profile saved to $(NSYS_DIR)/$(2).nsys-rep"
+endef
+
+nsys-baseline:
+	$(call run_nsys,env,baseline)
+
+nsys-fmms-triton:
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton)
+
+nsys-fmms-flashinfer:
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=flashinfer:top_k_top_p_sampling_from_logits,fmms-flashinfer)
+
+nsys-all:
+	$(MAKE) nsys-baseline nsys-fmms-triton
+
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all
 
 $(MODEL_DIR):
 	mkdir -p "$@"
