@@ -34,15 +34,19 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     return ax1
 
 
-def plot_relative_performance(bdf_rel_long: pd.DataFrame, ref_method: str) -> None:
+def plot_relative_performance(
+    bdf_rel_long: pd.DataFrame, ref_method: str, show_providers: list[str]
+) -> None:
+    plot_df = bdf_rel_long.query("provider in @show_providers")
     ax = sns.barplot(
-        bdf_rel_long.query("provider == @ref_method or provider == 'FMMS (Triton)'"),
+        plot_df,
         x="n_hidden_states",
         y="relative-perf",
         hue="provider",
     )
     ax.grid(alpha=0.5, axis="y")
-    sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.3), ncol=2)
+    ncol = 1  # min(len(show_providers), 2)
+    sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.35), ncol=ncol)
     ax.set_xlabel("Inference batch size")
     ax.set_ylabel("Relative Performance")
     ax.set_xticks(ax.get_xticks(), labels=bdf_rel_long["n_hidden_states"].unique().astype(int))
@@ -65,6 +69,7 @@ def plot_relative_performance_from_wide(
     bdf: pd.DataFrame,
     ref_method: str,
     ref_slug: str,
+    show_providers: list[str],
     case: str,
     plot_folder: Path,
     csv_folder: Path,
@@ -80,8 +85,10 @@ def plot_relative_performance_from_wide(
     bdf_rel_long.round(3).to_csv(
         csv_folder / f"relative-performance-vs-{ref_slug}-{case}.csv", index=False
     )
-    ax = plot_relative_performance(bdf_rel_long, ref_method)
-    ax.figure.savefig(plot_folder / f"relative-performance-vs-{ref_slug}-{case}.png", dpi=300)
+    ax = plot_relative_performance(bdf_rel_long, ref_method, show_providers)
+    ax.figure.savefig(
+        plot_folder / f"relative-performance-vs-{ref_slug}-{case}.png", dpi=300, bbox_inches="tight"
+    )
     return ax
 
 
@@ -102,15 +109,23 @@ def create_and_triton_bench_plots(folder: Path):
         ax.figure.savefig(tgt_folder / f"batch-scaling-{case}.png", dpi=300)
         plt.close(ax.figure)
 
-        ref_methods = {
-            "flashinfer1": "flashinfer:sampling_from_logits",
-            "flashinfer2": "flashinfer:top_k_top_p_sampling_from_logits",
-        }
-        for ref_slug, ref_method in ref_methods.items():
-            if ref_method not in bdf.columns:
+        FMMS = "FMMS (Triton)"  # noqa: N806
+        NAIVE = "Naive PyTorch Compiled"  # noqa: N806
+        FI_SAMPLE = "flashinfer:sampling_from_logits"  # noqa: N806
+        FI_TOPK = "flashinfer:top_k_top_p_sampling_from_logits"  # noqa: N806
+
+        rel_plots = [
+            # (1) FMMS vs PyTorch Compiled (baseline)
+            {"ref": NAIVE, "slug": "pytorch", "show": [FMMS, NAIVE]},
+            # (2) FMMS vs both FlashInfer kernels (top_k_top_p as baseline)
+            {"ref": FI_TOPK, "slug": "flashinfer", "show": [FMMS, FI_SAMPLE, FI_TOPK]},
+        ]
+        for rp in rel_plots:
+            if rp["ref"] not in bdf.columns:
                 continue
+            show = [p for p in rp["show"] if p in bdf.columns]
             ax = plot_relative_performance_from_wide(
-                bdf, ref_method, ref_slug, case, tgt_folder, folder
+                bdf, rp["ref"], rp["slug"], show, case, tgt_folder, folder
             )
             plt.close(ax.figure)
 
