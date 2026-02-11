@@ -44,6 +44,7 @@ class CliArgs(Args, cli_parse_args=True):
 
 provider_names = {
     "fused-triton": "FMMS (Triton)",
+    "fused-cuda": "FMMS (CUDA)",
     "fused-triton-no-gumbel": "FMMS (Triton NoNoise)",
     # "helion": "FMMS (Helion)",  # autotuning too slow atm. It runs on every bsz change
     "naive-compiled": "Naive PyTorch Compiled",
@@ -61,6 +62,7 @@ all_styles = [
     ("orange", "-"),
     ("red", "-"),
     ("purple", "-"),
+    ("brown", "-"),
 ]
 
 

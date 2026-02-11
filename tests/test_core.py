@@ -55,6 +55,7 @@ def test_bsz_h(args):
     "provider",
     [
         "fused-triton",
+        "fused-cuda",
         "naive-pt",
         "naive-compiled",
         "sequential-compiled",
