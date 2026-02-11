@@ -6,7 +6,7 @@ def make_app():
 
 
 def make_image():
-    img = modal.Image.from_registry("pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel")
+    img = modal.Image.from_registry("pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel")
     deps = [
         "flashinfer-python",
         "pandas",

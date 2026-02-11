@@ -99,6 +99,7 @@ vLLM's default (baseline) sampling path uses plain PyTorch ops (`matmul` + `soft
 | H100             | 1.355 | 1.329 | 1.310 | 1.312 | 1.311 | 1.317 | 1.385 | 1.299 | 1.076 |
 | H200             | 1.384 | 1.337 | 1.318 | 1.329 | 1.367 | 1.339 | 1.348 | 1.044 | 0.904 |
 | B200             | 1.523 | 1.455 | 1.436 | 1.449 | 1.450 | 1.421 | 1.299 | 0.984 | 0.851 |
+| B300             | 1.507 | 1.439 | 1.438 | 1.454 | 1.443 | 1.419 | 1.302 | 1.033 | 0.845 |
 
 **Llama 3 70B (V=128,256, d=8,192):**
 
@@ -109,6 +110,7 @@ vLLM's default (baseline) sampling path uses plain PyTorch ops (`matmul` + `soft
 | H100             | 1.209 | 1.198 | 1.194 | 1.194 | 1.203 | 1.210 | 1.269 | 1.175 | 0.854 |
 | H200             | 1.238 | 1.211 | 1.202 | 1.206 | 1.265 | 1.252 | 1.279 | 0.918 | 0.749 |
 | B200             | 1.305 | 1.258 | 1.257 | 1.239 | 1.266 | 1.256 | 1.245 | 0.906 | 0.730 |
+| B300             | 1.344 | 1.309 | 1.262 | 1.255 | 1.271 | 1.272 | 1.257 | 0.975 | 0.708 |
 
 FMMS is **~30% faster** on the 8B model and **~20% faster** on the 70B model across typical decode batch sizes (1--64) on datacenter GPUs. At large batch sizes (128--256), the matmul becomes compute-bound and the unfused baseline with cuBLAS catches up. On L4, FMMS is slower at small batches but faster at large ones.
 
@@ -127,6 +129,7 @@ The tables below show FMMS performance relative to `top_k_top_p_sampling_from_lo
 | H100             | 1.331 | 1.352 | 1.347 | 1.352 | 1.333 | 1.307 | 1.351 | 1.216 | 1.043 |
 | H200             | 1.361 | 1.349 | 1.361 | 1.394 | 1.407 | 1.346 | 1.339 | 0.977 | 0.906 |
 | B200             | 1.371 | 1.445 | 1.387 | 1.427 | 1.395 | 1.357 | 1.207 | 0.905 | 0.864 |
+| B300             | 1.685 | 1.778 | 2.160 | 1.976 | 2.124 | 2.010 | 1.779 | 1.211 | 1.123 |
 
 **Llama 3 70B (V=128,256, d=8,192):**
 
@@ -137,6 +140,7 @@ The tables below show FMMS performance relative to `top_k_top_p_sampling_from_lo
 | H100             | 1.194 | 1.231 | 1.210 | 1.218 | 1.211 | 1.197 | 1.249 | 1.122 | 0.837 |
 | H200             | 1.242 | 1.247 | 1.238 | 1.227 | 1.285 | 1.250 | 1.266 | 0.879 | 0.754 |
 | B200             | 1.206 | 1.242 | 1.251 | 1.210 | 1.238 | 1.222 | 1.177 | 0.844 | 0.733 |
+| B300             | 1.633 | 1.559 | 1.625 | 1.620 | 1.653 | 1.635 | 1.532 | 1.089 | 0.883 |
 
 FMMS is **between 20% and 45% faster** than the `top_k_top_p` kernel on the 8B model, and **between 15% and 29% faster** on the 70B model on datacenter GPUs at typical decode batch sizes (1--64). On L4, FMMS is faster at batch sizes 32+ (up to 1.5x on the 8B model).
 
@@ -153,6 +157,7 @@ FlashInfer's `sampling_from_logits` is a lean Gumbel-max kernel (no top-k/top-p 
 | H100             | 1.188 | 1.181 | 1.159 | 1.157 | 1.144 | 1.115 | 1.084 | 0.909 | 0.730 |
 | H200             | 1.161 | 1.149 | 1.125 | 1.128 | 1.152 | 1.099 | 1.038 | 0.721 | 0.669 |
 | B200             | 1.150 | 1.129 | 1.107 | 1.116 | 1.112 | 1.069 | 0.966 | 0.675 | 0.639 |
+| B300             | 1.162 | 1.155 | 1.136 | 1.126 | 1.113 | 1.070 | 0.973 | 0.693 | 0.586 |
 
 **Llama 3 70B (V=128,256, d=8,192):**
 
@@ -163,6 +168,7 @@ FlashInfer's `sampling_from_logits` is a lean Gumbel-max kernel (no top-k/top-p 
 | H100             | 1.133 | 1.132 | 1.122 | 1.126 | 1.112 | 1.098 | 1.103 | 0.937 | 0.663 |
 | H200             | 1.112 | 1.108 | 1.097 | 1.097 | 1.146 | 1.116 | 1.094 | 0.733 | 0.618 |
 | B200             | 1.087 | 1.075 | 1.068 | 1.057 | 1.061 | 1.053 | 1.023 | 0.705 | 0.600 |
+| B300             | 1.143 | 1.141 | 1.079 | 1.079 | 1.073 | 1.069 | 1.035 | 0.746 | 0.553 |
 
 FMMS is **between 5% and 19% faster** than `sampling_from_logits` on datacenter GPUs at typical decode batch sizes (1--32), despite `sampling_from_logits` being a highly optimized unfused Gumbel-max kernel. At larger batch sizes (128+), the unfused kernel wins because cuBLAS dominates and the fusion overhead grows.
 
