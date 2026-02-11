@@ -13,6 +13,27 @@ However, the kernel currently only supports vanilla categorical sampling
 **top-p** (nucleus) sampling. This document analyzes whether these can be
 fused into the kernel.
 
+### The matmul is memory-bound for decode workloads
+
+The FMMS kernel targets LLM decode, where the batch dimension H (number of
+hidden states) is small. The matmul `W[V,D] × H[D,H]` has arithmetic
+intensity:
+
+```
+FLOPs / bytes ≈ (2·V·D·H) / (2·V·D) = H
+```
+
+At H=1 (single-request decode), arithmetic intensity is **1** — pure
+memory-bound. At H=64, it's 64 — still well below the H100's
+compute-to-bandwidth ratio (~330 FLOPs/byte for BF16 tensor cores). The matmul
+only becomes compute-bound around H≈128+.
+
+**Consequence:** for decode workloads, the kernel's throughput is limited by
+how fast it reads the weight matrix from HBM. Every byte loaded should do as
+much useful work as possible — matmul, top-k selection, top-p filtering, and
+sampling — in a single pass. Any extra kernel launch that re-reads data from
+HBM wastes bandwidth on what is already the bottleneck.
+
 ## FlashInfer's rejection sampling
 
 FlashInfer ([blog post](https://flashinfer.ai/2025/03/10/sampling.html))
@@ -249,6 +270,108 @@ tile (using `tl.sort` + slice — not optimal but functional), and write a small
 CUDA C++ kernel only for the merge + top-p + sample step where CUB primitives
 shine. This gets ~90% of the benefit without rewriting the matmul.
 
+## Quack / CuTe-DSL: hierarchical reductions for memory-bound decode
+
+Reference: [Getting Memory-bound Kernels to Speed-of-Light](https://github.com/Dao-AILab/quack/blob/main/media/2025-07-10-membound-sol.md)
+(Wentao Guo, Ted Zadouri, Tri Dao)
+
+### Why this matters for FMMS
+
+The FMMS matmul is **memory-bound** at decode batch sizes. Since the kernel
+spends most of its time reading weights from HBM, every byte loaded should do
+as much work as possible in a single pass — matmul, top-k, top-p, sampling.
+Any extra kernel launch that re-reads data wastes bandwidth on the bottleneck.
+
+Quack demonstrates achieving 90% of H100 peak HBM bandwidth (3.01 out of
+3.35 TB/s) by reducing at every level of the memory hierarchy before touching
+the next slower level:
+
+```
+Thread registers  (>100 TB/s, ~few ns)
+  → Warp shuffle  (~10s ns)
+    → Block SMEM  (20-30 TB/s, ~10-20 ns)
+      → Cluster DSMEM  (5-10 TB/s, ~150-200 ns)  ← Hopper sm_90+
+        → Grid HBM  (3.35 TB/s, ~400 ns)         ← last resort
+```
+
+Their softmax kernel loads data **once** from HBM and does all reductions
+through this hierarchy. Torch.compile's Triton kernel loads **twice** (once for
+max, once for softmax) and achieves only ~2 TB/s — a 50% throughput gap.
+
+### How this applies: single-pass fused kernel
+
+The current FMMS stage 2 writes per-tile maxes to HBM and reads them back in a
+separate PyTorch reduction — an HBM round-trip. For the top-k extension, this
+gets worse: each tile writes k values instead of 1.
+
+With Hopper thread block clusters, the entire pipeline can stay on-chip:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Per V-tile (in registers):                             │
+│    1. Load weight tile from HBM (only HBM read)        │
+│    2. Matmul: W_tile × H^T → logits_tile               │
+│    3. Temperature scale                                 │
+│    4. Local top-k selection (sort/select in registers)  │
+│                                                         │
+│  Warp reduction:                                        │
+│    5. Shuffle-merge local top-k across warp lanes       │
+│                                                         │
+│  Block reduction (SMEM):                                │
+│    6. Merge warp top-k lists into block top-k           │
+│                                                         │
+│  Cluster reduction (DSMEM, Hopper only):                │
+│    7. Merge block top-k lists across cluster via DSMEM  │
+│    8. Softmax on merged top-k candidates (small)        │
+│    9. BlockScan cumsum for top-p threshold              │
+│   10. Sample from survivors                             │
+│                                                         │
+│  Write to HBM: one token index per sequence             │
+└─────────────────────────────────────────────────────────┘
+```
+
+A cluster of 8 blocks (8 V-tiles) merges via DSMEM at 5-10 TB/s instead of
+HBM at 3.35 TB/s. The final cross-cluster merge involves only
+`num_clusters × k` elements — tiny. For V=128K with BLOCK_SIZE_V=256 and
+cluster_size=8, there are 512/8 = 64 clusters; with k=50, the final merge is
+64 × 50 = 3,200 elements.
+
+### Top-p becomes feasible within a cluster
+
+Top-p requires a global softmax normalization constant. With cluster DSMEM,
+this can happen without HBM:
+
+1. Each tile computes local top-k candidates + local max logit during matmul.
+2. **Cluster DSMEM sync:** share max logits across the cluster, compute
+   cluster-wide max.
+3. Each tile computes `exp(logit - max)` and local sum for its candidates.
+4. **Cluster DSMEM sync:** merge sums, compute cumsum for top-p.
+5. Apply top-p threshold and sample.
+
+Both "passes" happen in SMEM/DSMEM — HBM is touched only once (weight loads).
+
+### CuTe-DSL as implementation path
+
+Quack uses **CuTe-DSL** (Python), not raw CUDA C++ or CUTLASS templates. This
+is more accessible than the CUTLASS epilogue approach — you get explicit
+control over the memory hierarchy (vectorized 128-bit loads, shuffle
+reductions, DSMEM barriers) while writing Python. The TV-layout system handles
+memory coalescing automatically.
+
+This could be a better development path than either Triton (which cannot
+express clusters or DSMEM) or CUTLASS C++ (template-heavy, hard to debug).
+
+### Limitations
+
+- **Hopper only.** Thread block clusters and DSMEM require sm_90+ (H100, H200).
+  The current codebase targets RTX 3090 (sm_86). A Triton fallback would still
+  be needed for pre-Hopper GPUs.
+- **CuTe-DSL maturity.** CuTe-DSL is newer than Triton and CUTLASS. Tooling
+  (profiling, debugging) is less established.
+- **Matmul in CuTe.** Writing an efficient thin-matmul (GEMV) in CuTe-DSL is
+  more manual than Triton's `tl.dot`, though CuTe provides the building blocks
+  (MMA atoms, tiled copies).
+
 ## Summary
 
 | Strategy       | Fusible?  | Difficulty | Notes                                             |
@@ -258,12 +381,15 @@ shine. This gets ~90% of the benefit without rewriting the matmul.
 | **Top-k+top-p**| Partially | Medium     | Fuse top-k, apply top-p on k survivors post-kernel.|
 | **Min-p**      | No        | —          | Needs global max logit as threshold reference.    |
 
-| Language         | Best for                          | Limitation                      |
-|------------------|-----------------------------------|---------------------------------|
-| **Triton**       | Matmul + local top-k (tile sort)  | No partial sort, no scan        |
-| **CUDA/CUTLASS** | Full pipeline (matmul + top-k + top-p) | High dev cost, NVIDIA only |
-| **Hybrid**       | Triton matmul + CUDA top-p kernel | Best effort/benefit ratio       |
+| Language         | Best for                               | Limitation                      |
+|------------------|----------------------------------------|---------------------------------|
+| **Triton**       | Matmul + local top-k (tile sort)       | No partial sort, no scan, no clusters |
+| **CUDA/CUTLASS** | Full pipeline (matmul + top-k + top-p) | High dev cost, NVIDIA only      |
+| **CuTe-DSL**     | Full pipeline with cluster reductions  | Hopper only, less mature        |
+| **Hybrid**       | Triton matmul + CUDA top-p kernel      | Best effort/benefit ratio       |
 
-The dominant cost in all cases is the matmul, which is unchanged. The overhead
-of within-tile top-k and the merge reduction is small for practical k values
-(k ≤ 64 covers nearly all real workloads).
+The FMMS matmul is **memory-bound** for LLM decode workloads (H ≤ ~128). The
+dominant cost is reading the weight matrix from HBM. Fusing top-k/top-p into
+the kernel avoids extra HBM traffic for intermediate logits, and hierarchical
+reductions (especially Hopper DSMEM clusters) can keep the merge/sampling
+stages entirely on-chip.
