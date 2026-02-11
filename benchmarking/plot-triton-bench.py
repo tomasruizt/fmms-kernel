@@ -17,15 +17,21 @@ BENCHMARK_CASES = {
 BYTES_PER_ELEMENT = 2  # bf16
 BYTES_PER_INDEX = 8  # int64 (torch.multinomial output)
 
-# Peak HBM bandwidth in GB/s per GPU.
-# Sources: official NVIDIA datasheets.
+# Peak HBM/GDDR bandwidth in GB/s per GPU.
 GPU_PEAK_BW_GBS: dict[str, float] = {
+    # https://www.nvidia.com/en-us/data-center/h100/
     "NVIDIA H100 80GB HBM3": 3350,
+    # https://www.nvidia.com/en-us/data-center/h200/
     "NVIDIA H200": 4800,
+    # https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-nvidia-us-2188504-web.pdf
     "NVIDIA A100-SXM4-80GB": 2039,
+    # 64/8=8 in https://resources.nvidia.com/en-us-dgx-systems/dgx-b200-datasheet
     "NVIDIA B200": 8000,
+    # 64/8=8 in https://resources.nvidia.com/en-us-dgx-systems/dgx-b300-datasheet
     "NVIDIA B300 SXM6 AC": 8000,
+    # https://www.nvidia.com/en-us/data-center/l4/
     "NVIDIA L4": 300,
+    # https://www.techpowerup.com/gpu-specs/geforce-rtx-3090.c3622
     "NVIDIA GeForce RTX 3090": 936,
 }
 
@@ -117,7 +123,17 @@ def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = N
     )
 
     if peak_bw_gbs is not None:
-        ax.axhline(peak_bw_gbs, color="gray", linestyle="--", linewidth=1, label="Peak HBM BW")
+        ax.axhline(peak_bw_gbs, color="gray", linestyle="--", linewidth=1)
+        ax.text(
+            0.01,
+            peak_bw_gbs,
+            "Peak Memory Bandwidth",
+            transform=ax.get_yaxis_transform(),
+            va="bottom",
+            ha="left",
+            fontsize=8,
+            color="gray",
+        )
 
     ax.set_xscale("log")
     unique_n_hidden = sorted(bdf_long["n_hidden_states"].unique())
