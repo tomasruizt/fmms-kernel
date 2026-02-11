@@ -72,6 +72,7 @@ GPU := H100
 NSYS_DIR := $(RESULTS_DIR)/profiles/nsight/$(GPU)/$(MODEL_SLUG)
 NSYS_MAX_TOKENS := 10
 NSYS_PROMPT := What is 2+2?
+NSYS_MODEL := openai/gpt-oss-20b
 
 # Usage: $(call run_nsys,<env_prefix>,<output_name>)
 # 1. Start vLLM under nsys with cudaProfilerApi capture.
@@ -82,11 +83,12 @@ NSYS_PROMPT := What is 2+2?
 define run_nsys
 	mkdir -p "$(NSYS_DIR)"
 	$(1) VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
-	    sudo -E $(NSYS) profile \
+	    sudo -E setsid $(NSYS) profile \
 	        --capture-range=cudaProfilerApi --capture-range-end=stop \
 	        --force-overwrite true \
 	        -o "$(NSYS_DIR)/$(2)" \
-	        $(VLLM) serve $(MODEL) $(SERVE_FLAGS) \
+	        $(VLLM) serve $(NSYS_MODEL) $(SERVE_FLAGS) \
+	            --gpu-memory-utilization 0.90 \
 	            --profiler-config.profiler=cuda \
 	        > "$(NSYS_DIR)/$(2)-server.log" 2>&1 & \
 	NSYS_PID=$$!; \
@@ -98,19 +100,26 @@ define run_nsys
 	echo "Warmup request..."; \
 	curl -s http://localhost:8000/v1/chat/completions \
 	    -H "Content-Type: application/json" \
-	    -d '{"model":"$(MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6}' \
+	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}' \
 	    > /dev/null; \
 	echo "Starting profile..."; \
 	curl -s -X POST http://localhost:8000/start_profile; \
 	curl -s http://localhost:8000/v1/chat/completions \
 	    -H "Content-Type: application/json" \
-	    -d '{"model":"$(MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6}' \
+	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}' \
 	    | tee "$(NSYS_DIR)/$(2)-response.json"; \
 	echo; \
 	curl -s -X POST http://localhost:8000/stop_profile; \
 	echo "Stopping server..."; \
 	sleep 2; \
-	sudo kill $$NSYS_PID 2>/dev/null; wait $$NSYS_PID 2>/dev/null; \
+	sudo kill $$NSYS_PID 2>/dev/null; sudo pkill -f "bin/vllm serve" 2>/dev/null; wait $$NSYS_PID 2>/dev/null; \
+	echo "Waiting for GPU memory to free..."; \
+	for i in $$(seq 1 30); do \
+	    FREE=$$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1); \
+	    TOTAL=$$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1); \
+	    [ "$$FREE" -gt "$$((TOTAL - 1000))" ] 2>/dev/null && break; \
+	    sleep 1; \
+	done; \
 	echo "Profile saved to $(NSYS_DIR)/$(2).nsys-rep"
 endef
 
