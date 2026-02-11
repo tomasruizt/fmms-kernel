@@ -25,12 +25,10 @@ The Brev cloud GPU environment (shadeform) has several non-standard behaviors:
 - **`datasets` / `pyarrow` conflict**: The pre-installed `datasets==2.14.4` is incompatible with `pyarrow==23.0.0` (`pa.PyExtensionType` was removed). Fix: `pip install --upgrade datasets` (upgrades to 4.5.0+).
 - **HuggingFace**: Not logged in by default. Set `HF_TOKEN` env var for gated models.
 - **Pip cache**: `/ephemeral/cache/pip` has wrong permissions; pip disables cache automatically (harmless warning).
-- **Makefile overrides** needed for benchmarks on Brev:
+- **Makefile portability**: Both `benchmarking/Makefile` and `benchmarking/vllm/Makefile` use `$(shell which python)` / `$(shell which vllm)` to discover binaries dynamically. No hard-coded paths — just activate the correct venv before running `make`. Example:
   ```bash
   HOME=/home/shadeform make -C benchmarking/vllm quick \
     MODEL=openai/gpt-oss-120b \
-    VLLM=/home/shadeform/.venv/bin/vllm \
-    PYTHON=/home/shadeform/.venv/bin/python \
     HF_TOKEN=<token>
   ```
 

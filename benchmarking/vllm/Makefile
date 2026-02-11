@@ -1,10 +1,9 @@
-VLLM_DIR := $(HOME)/code/vllm
-RESULTS_DIR := $(HOME)/code/fused-mm-sample/benchmarking/vllm
-VLLM := $(VLLM_DIR)/venv/bin/vllm
-PYTHON := $(HOME)/code/fused-mm-sample/.venv/bin/python
+RESULTS_DIR := $(CURDIR)
+VLLM := $(shell which vllm)
+PYTHON := $(shell which python)
 BENCH_PARAMS := $(RESULTS_DIR)/bench-params.json
 
-MODEL := Qwen/Qwen3-1.7B
+MODEL := openai/gpt-oss-120b
 MODEL_SLUG := $(lastword $(subst /, ,$(MODEL)))
 MAX_MODEL_LEN := 1024
 MODEL_DIR := $(RESULTS_DIR)/$(MODEL_SLUG)
@@ -68,7 +67,7 @@ endef
 # Profiles vLLM decode steps under nsys. Uses cudaProfilerApi capture range so
 # nsys only records between /start_profile and /stop_profile, skipping model
 # load, warmup, and CUDA graph capture.
-NSYS := $(shell which nsys)
+NSYS := $(or $(shell which nsys 2>/dev/null),$(wildcard /opt/nvidia/nsight-systems/*/bin/nsys))
 GPU := H100
 NSYS_DIR := $(RESULTS_DIR)/profiles/nsight/$(GPU)/$(MODEL_SLUG)
 NSYS_MAX_TOKENS := 10
@@ -127,7 +126,7 @@ nsys-fmms-flashinfer:
 nsys-all:
 	$(MAKE) nsys-baseline nsys-fmms-triton
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all engine-stats
 
 $(MODEL_DIR):
 	mkdir -p "$@"
@@ -208,3 +207,13 @@ eval-fmms-triton:
 
 judge:
 	$(PYTHON) "$(RESULTS_DIR)/judge_eval.py" $(JUDGE_DIRS)
+
+engine-stats:
+	@for log in $(MODEL_DIR)/*/; do \
+		latest=$$(ls -td "$$log"*/ 2>/dev/null | head -1); \
+		if [ -f "$$latest/sweep.log" ]; then \
+			echo "=== $$(basename $$log) ==="; \
+			$(PYTHON) "$(RESULTS_DIR)/parse_engine_stats.py" "$$latest/sweep.log" --by-concurrency; \
+			echo; \
+		fi; \
+	done
