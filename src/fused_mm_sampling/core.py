@@ -449,7 +449,10 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
         case "flashinfer:top_k_top_p_sampling_from_logits":
             return SimpleSampler(
                 lambda **kwargs: flashinfer_top_k_top_p_sampling_from_logits(
-                    **kwargs, top_p=0.95, top_k=20
+                    **kwargs,
+                    # these params effectively disable top-p and top-k filtering
+                    top_p=1.0,
+                    top_k=-1,
                 )
             )
         case "fused-cuda":
