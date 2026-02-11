@@ -21,8 +21,8 @@ def main():
     # load the tokenizer and the model
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model: GenerationMixin = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype="bfloat16", device_map="auto"
-    )
+        model_name, dtype="bfloat16"
+    ).to("cuda")
 
     prompts = [
         "Give me a short introduction to large language model.",

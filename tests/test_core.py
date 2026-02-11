@@ -17,6 +17,7 @@ device = torch.device("cuda")
 
 def test_jl_sampling_aproximate_correctness():
     folder = Path(__file__).parent / "qwen3-0.6b"
+    assert folder.exists(), f"{folder} does not exist. Run generate_inputs.py first"
     weights = torch.load(folder / "weights.pt", map_location=device)
     hidden_states = torch.load(folder / "hidden_states.pt", map_location=device)
     expected_logits = hidden_states @ weights.T
