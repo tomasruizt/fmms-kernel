@@ -79,17 +79,15 @@ sharded vocab size (16K-64K) rather than the full 128K-256K.
 
 ## Benchmark Configurations
 
-The most popular open LLMs share similar vocab sizes (~128K-152K). The main differentiator
-is **hidden_size**, which scales with model size and directly affects matmul compute.
+The tables above show that popular open LLMs share similar vocab sizes (~128K-152K).
+The real variable is **hidden_size**, which scales with model size and directly determines the matmul cost.
+Vocab size (V=128,256) is held constant across benchmarks since it barely varies across model families.
 
-| Group | vocab_size | hidden_size | LM Head (bf16) | Representative Models |
-|-------|-----------|-------------|-----------------|----------------------|
-| **Small (8B-class)** | 128,256 | 4,096 | 1.0 GB | Llama 3 8B, Qwen3 8B (V=152K), Qwen3-235B-A22B MoE |
-| **Large (70B-class)** | 128,256 | 8,192 | 2.0 GB | Llama 3 70B, DeepSeek V3 (V=129K, D=7168) |
+The two benchmark configs differ only in hidden_size:
 
-The two groups differ by **2x in hidden_size**, giving a clear performance scaling signal.
-Vocab size is held constant at 128,256 (Llama 3) since the most popular model families
-(Llama, Qwen, DeepSeek) all use ~128K-152K vocabularies.
+| Group | hidden_size | Representative Models |
+|-------|-------------|----------------------|
+| **Small (d=4,096)** | 4,096 | Llama 3 8B, Qwen3 8B, Qwen3-235B-A22B MoE |
+| **Large (d=8,192)** | 8,192 | Llama 3 70B, DeepSeek V3 |
 
-Gemma 3's 262K vocabulary is an outlier among popular models and could be used as an
-optional stress test for memory-bandwidth sensitivity.
+Gemma 3's 262K vocabulary is an outlier and could be used as a stress test for memory-bandwidth sensitivity.
