@@ -1,15 +1,17 @@
 # FMMS Algorithm: Fused Matrix Multiplication & Sampling
 
-High-performance GPU implementation of fused matrix multiplication + sampling using Triton. This package provides an efficient kernel for sampling from categorical distributions where logits are computed on-the-fly from matrix multiplication, avoiding the need to materialize the full logit tensor in GPU main memory (HBM).
+High-performance GPU implementation of fused matrix multiplication + sampling using Triton.
+This package provides an efficient kernel for sampling from categorical distributions where logits are computed on-the-fly from matrix multiplication, avoiding the need to materialize the full logit tensor in GPU main memory (GMEM).
+The key insight is that in LLM decode workloads, both the matmul and the sampling are memory-bound (the matmul collapses to a matrix-vector product).
+By fusing both operations, we avoid round-trips to GPU main memory (GMEM) and speed up the sampling process.
 
 ## Features
 
-- **Memory Efficient**: Fuses matrix multiplication and sampling into a single Triton kernel, avoiding materialization of large intermediate logit tensors
-- **GPU Optimized**: Uses Gumbel-max trick for efficient categorical sampling on GPUs
-- **Flexible**: Supports temperature scaling, large batch sizes, and multiple samples per hidden state vector.
+- **Bandwidth-Efficient**: Fuses matrix multiplication and sampling into a single Triton kernel, avoiding materialization of intermediate logit tensors, and preventing round-trips to GMEM.
+- **Exact**: Uses Gumbel-max trick for efficient categorical sampling. No approximations.
+- **Flexible**: Supports temperature scaling and multiple samples per hidden state vector.
 
 ## Installation
-We use uv, but its not strictly necessary.
 
 ```bash
 # Clone the repository
@@ -26,21 +28,16 @@ python examples/basic_usage.py
 ## Usage
 
 For a complete working example, see [`examples/basic_usage.py`](examples/basic_usage.py).
-
-```bash
-python examples/basic_usage.py
-```
-
 The basic usage pattern:
 
 ```python
 from fused_mm_sampling import fused_mm_sample_triton
 
 samples = fused_mm_sample_triton(
-    weights=weights,        # [hidden_size, vocab_size]
+    weights=weights,        # [vocab_size, hidden_size]
     hidden_states=hidden_states,  # [n_hidden_states, hidden_size]
     num_samples=1,
-    temperature=1.0,
+    temperature=torch.tensor(1.0, device="cuda"),  # scalar (0-d) CUDA tensor
     seed=42  # Optional: for reproducibility
 )
 # Returns: [n_hidden_states, num_samples]
@@ -48,43 +45,28 @@ samples = fused_mm_sample_triton(
 
 ### Parameters
 
-- **`weights`** (Tensor): Weight matrix of shape `[hidden_size, vocab_size]`
+- **`weights`** (Tensor): Weight matrix of shape `[vocab_size, hidden_size]`
 - **`hidden_states`** (Tensor): Hidden states of shape `[n_hidden_states, hidden_size]`
 - **`num_samples`** (int): Number of samples to draw per sequence position
-- **`temperature`** (float): Temperature for sampling (higher = more random)
+- **`temperature`** (Tensor): Scalar (0-d) CUDA tensor for temperature scaling (higher = more random)
 - **`seed`** (int, optional): Random seed for reproducibility
 
 ### Returns
 
 - Tensor of shape `[n_hidden_states, num_samples]` containing sampled indices
 
-## How It Works
+### Algorithm
 
-The package implements the Gumbel-max trick for categorical sampling:
+The FMMS kernel implements the Gumbel-max trick for categorical sampling:
 
-1. **Matrix Multiplication**: Compute logits = hidden_states @ weights
+1. **Matrix Multiplication**: Compute a tile of logits = hidden_states @ weights in SRAM
 2. **Temperature Scaling**: Scale logits by temperature
-3. **Gumbel Noise**: Add Gumbel noise to scaled logits
-4. **Argmax**: Take argmax to get samples
+3. **Gumbel Noise**: Add Gumbel noise to scaled logits tile
+4. **Argmax**: Take argmax within the tile to get samples
 
-The fused implementations compute these steps in blocks without materializing the full logit tensor, saving memory and improving performance for large vocabulary sizes.
+The FMMS kernel computes these steps in blocks without materializing the full logit tensor, preventing memory accesses, and relieving the bottleneck on the memory bandwidth.
 
 ## Benchmarking
-
-Run speed benchmarks:
-
-```bash
-# Navigate to benchmarking directory
-cd benchmarking
-
-# Benchmark all implementations
-python speed_test.py
-
-# Benchmark specific implementation
-python speed_test.py --name fused-triton
-python speed_test.py --name naive-compiled
-python speed_test.py --name naive-pt
-```
 
 ### FMMS vs Naive PyTorch Compiled
 
@@ -188,7 +170,25 @@ The following tables show absolute execution times (in milliseconds) on H100.
 | flashinfer:top_k_top_p_sampling_from_logits | 0.851 | 0.857 | 0.857 | 0.860 | 0.873 | 0.882 | 0.930 | 0.993 | 1.268 |
 | flashinfer:sampling_from_logits             | 0.803 | 0.803 | 0.804 | 0.806 | 0.811 | 0.821 | 0.862 | 0.897 | 1.086 |
 
-*All benchmarks: PyTorch 2.9.1, CUDA 12.8, run on Modal. Data as of 2026-02-11.*
+*All benchmarks: PyTorch 2.10.0, CUDA 13.0, run on Modal. Data as of 2026-02-11.*
+
+#### Runnnig the Benchmarks
+
+```bash
+# Navigate to benchmarking directory
+cd benchmarking
+
+# Benchmark all implementations
+python speed_test.py
+
+# Benchmark specific implementation
+python speed_test.py --name fused-triton
+python speed_test.py --name naive-compiled
+python speed_test.py --name naive-pt
+
+# Compare performance over many batch sizes
+make triton-benchmark
+```
 
 ## Profiling
 
@@ -227,29 +227,28 @@ make nsight-profile-fused-triton
 make nsight-profile-naive-compiled
 ```
 
-## Project Structure
-
-```
-fused-mm-sample/
-├── src/
-│   └── fused_mm_sampling/
-│       └── core.py              # Core implementation
-├── examples/
-│   └── basic_usage.py           # Basic usage example
-└── benchmarking/
-    ├── Makefile                 # Profiling commands
-    ├── speed_test.py            # Speed bench script
-    ├── profile-mem.py           # Memory profiling script
-    └── verify-fused-impl.ipynb  # Verification notebook
-```
-
 ## Development
 
-### Setting Up Development Environment
+### Development Environment
+
 The dev dependencies permit running the scripts in the `benchmarking/` directory. To install them, run:
 
 ```bash
 uv pip install -e ".[dev]"
+```
+
+### Modal Setup
+The experiments involving many differnt GPUs were run on Modal. To install and login to Modal:
+
+```bash
+uv pip install modal
+modal setup
+```
+
+Run the speed-test on modal:
+
+```bash
+make modal-speed-test
 ```
 
 ## License
@@ -258,21 +257,4 @@ MIT License - see LICENSE file for details
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-
-## Modal Setup
-
-Install and login to Modal:
-
-```bash
-uv pip install modal
-modal setup
-```
-
-Run the modal example, or speed-test:
-
-```bash
-make modal-example
-make modal-speed-test
-```
+Contributions are welcome! Please feel free to create an issue or submit a pull request.
