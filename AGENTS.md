@@ -8,6 +8,20 @@ Development notes and lessons learned while building this project.
 - **Never introduce GPU-CPU synchronizations.** Operations like `tensor.item()`, `float(tensor)`, `tensor.cpu()`, or `print(tensor)` on CUDA tensors force the CPU to wait for all pending GPU work to finish, destroying pipeline parallelism. Pass scalar values as 0-d CUDA tensors instead of extracting Python floats. Both the Triton kernel (`tl.load(temperature_ptr)`) and the Helion kernel (`temperature: torch.Tensor`) accept 0-d tensors directly.
 - **Always save logs to the output folder.** When running servers, benchmarks, or evals, pipe stdout/stderr to a log file in the results directory so logs are always accessible after the run. Never discard or hide process output.
 
+## Writing style (README, blog post, docs)
+
+- Single author project — never use "we", use "I" or passive voice.
+- One sentence per line in prose sections, to make git diffs cleaner.
+- Don't write `torch.compile`-d or `torch.compiled` — say "torch compiled".
+- Avoid jargon like "unfused" or "lean" when simpler words work ("baseline", "Gumbel-max kernel").
+- When stating speedup ranges, verify them against the actual table data. Use "generally outperforms" rather than "always" when there are exceptions.
+
+## Blog post
+
+The blog post lives at `~/code/tomasruizt.github.io/tomas-blog/posts/07_fused-mm-sample/index.qmd` (Quarto format).
+It should be kept in sync with the README benchmark numbers.
+The blog uses only the "large" config (V=128,256, d=8,192) for its tables.
+
 ## Development environment
 
 - Use the `.venv` in the repo root (not system Python). Run tests/scripts with `.venv/bin/python` or `.venv/bin/pytest`.
@@ -99,6 +113,7 @@ The `findings/` directory contains detailed write-ups of bugs, workarounds, and 
 - `rtx3090-barrier-comparison/` — Raw benchmark results (speed test, proton, NCU) for barrier vs two-stage on RTX 3090.
 - `fused-top-k-top-p-feasibility.md` — Analysis of fusing top-k/top-p into the FMMS kernel. Top-k is feasible (tile-local top-k + merge); top-p is not directly fusible (needs global softmax + sorted cumsum). Practical path: fuse top-k, apply top-p on survivors post-kernel.
 - `arithmetic-intensity-decode-matmul.md` — The decode matmul has arithmetic intensity ≈ H (batch size). Memory-bound up to H≈295 on H100 (BF16), H≈152 on RTX 3090. Includes ops:byte ratio derivation and data sources.
+- `lm-head-configurations.md` — Survey of LM head shapes (vocab_size, hidden_size) across popular LLMs. Conclusion: vocab sizes cluster around 128K-152K; hidden_size is the real variable. Two benchmark groups: small (d=4,096) and large (d=8,192).
 
 ## Architecture
 
@@ -279,9 +294,9 @@ make modal-plot-triton-bench GPU=h100!             # generates plots from CSVs
 
 **Key files**:
 - `src/fused_mm_sampling/modal_lib/modal_triton_benchmark.py` — Modal app definition
-- `src/fused_mm_sampling/modal_lib/utils.py` — image (PyTorch 2.9.1 + CUDA 12.8), volume config
+- `src/fused_mm_sampling/modal_lib/utils.py` — image (PyTorch 2.10.0 + CUDA 13.0), volume config
 - `src/fused_mm_sampling/bench/triton_benchmark.py` — benchmark runner, `Args` dataclass, `BENCHMARK_CASES`
-- `benchmarking/plot-triton-bench.py` — plotting script
+- `benchmarking/plot-triton-bench.py` — plotting script, also contains `GPU_PEAK_BW_GBS` and `GPU_PEAK_COMPUTE_TFLOPS` dicts with per-GPU specs (HBM bandwidth, peak BF16 TFLOP/s)
 
 **Results location**: `benchmarking/modal-results/triton-bench-{GPU}{POSTFIX}/` containing CSVs, plots in `custom-plots/`, and `logs.txt`.
 
