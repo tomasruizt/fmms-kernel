@@ -239,6 +239,12 @@ python speed_test.py --name naive-pt
 make triton-benchmark
 ```
 
+## TODO
+
+- [ ] **vLLM integration**: Benchmark FMMS end-to-end inside vLLM to measure the impact on time-per-output-token (TPOT).
+A prototype integration exists on a private branch (see [`findings/vllm-integration.md`](findings/vllm-integration.md)).
+- [ ] **Sampling quality**: Run GSM8K with and without FMMS to verify that fused sampling does not degrade model accuracy.
+
 ## Profiling
 
 All profiling scripts are located in the `benchmarking/` directory.
