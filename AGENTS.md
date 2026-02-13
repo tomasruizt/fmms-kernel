@@ -25,6 +25,31 @@ The blog post lives at `~/code/tomasruizt.github.io/tomas-blog/posts/07_fused-mm
 It should be kept in sync with the README benchmark numbers.
 The blog uses only the "large" config (V=128,256, d=8,192) for its tables.
 
+### Quarto conventions
+
+- **Panel tabsets**: `::: {.panel-tabset group="name"}` with `# Tab Name` headers. The `group=` attribute synchronizes tab selection across multiple tabsets with the same group name.
+- **Nested tabsets**: Use `::::` (4 colons) for the outer tabset and `:::` (3 colons) for the inner tabset. Outer tabs use `#` headers, inner tabs use `##` headers. Example:
+
+  ```markdown
+  :::: {.panel-tabset group="baseline"}
+  # vs PyTorch Compiled
+  ::: {.panel-tabset group="gpu"}
+  ## B300
+  ![](imgs/relative-perf-vs-pytorch-b300.png)
+  ## H100
+  ![](imgs/relative-perf-vs-pytorch-h100.png)
+  :::
+  # vs FlashInfer
+  ...
+  ::::
+  ```
+
+- **Plots before tables**: Show the plot first, then the data table beneath it. This gives the reader the visual takeaway before the numbers.
+- **GPU ordering**: B300, B200, H200, H100, A100 (strongest to weakest) in all tabsets and table rows.
+- **Table precision**: At most 2 decimal places for all numeric values.
+- **Images**: Blog images are stored in `~/code/tomasruizt.github.io/tomas-blog/posts/07_fused-mm-sample/imgs/` and referenced as `![](imgs/filename.png)`. Copy from `benchmarking/modal-results/` when updating.
+- **TODO section**: A commented-out HTML section (`<!-- ... -->`) near the top of the blog post tracks planned improvements. Update it as items are completed or new ideas arise.
+
 ## Development environment
 
 - Use the `.venv` in the repo root (not system Python). Run tests/scripts with `.venv/bin/python` or `.venv/bin/pytest`.
