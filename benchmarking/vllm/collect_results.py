@@ -9,8 +9,10 @@ The second form prints per-run TPOT for a single variant.
 """
 
 import sys
+from itertools import product
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from tabulate import tabulate
 
@@ -36,8 +38,14 @@ def read_summary(results_dir: Path, variant_key: str) -> tuple[pd.DataFrame, str
     return df, run_dir.name
 
 
+def hodges_lehmann_pct(baseline_vals, fmms_vals):
+    """Hodges-Lehmann estimator: median of all pairwise speedup percentages."""
+    pairs = [(f - b) / b * 100 for b, f in product(baseline_vals, fmms_vals)]
+    return np.median(pairs)
+
+
 def print_summary(results_dir: Path):
-    tpot_frames = {}
+    raw_frames = {}
     num_runs = None
     for variant_key, display_name in VARIANTS:
         variant_dir = results_dir / variant_key
@@ -47,16 +55,27 @@ def print_summary(results_dir: Path):
         df, run_name = read_summary(results_dir, variant_key)
         print(f"{variant_key}: {run_name}")
         num_runs = df["run_number"].nunique()
-        last_run = df["run_number"].max()
-        last = df[df["run_number"] == last_run]
-        tpot_frames[variant_key] = last.set_index("max_concurrency")["median_tpot_ms"].rename(
-            display_name
-        )
+        raw_frames[variant_key] = df
+
+    # Median TPOT across all runs per concurrency level
+    tpot_frames = {}
+    for variant_key, display_name in VARIANTS:
+        if variant_key not in raw_frames:
+            continue
+        df = raw_frames[variant_key]
+        median_tpot = df.groupby("max_concurrency")["median_tpot_ms"].median().rename(display_name)
+        tpot_frames[variant_key] = median_tpot
 
     tpot = pd.concat(tpot_frames.values(), axis=1)
+
+    if "Baseline" not in tpot.columns:
+        print("\nNo baseline found, printing available variants only.\n")
+        print(tabulate(tpot, headers="keys", tablefmt="grid", floatfmt=".2f"))
+        return
+
     baseline = tpot["Baseline"]
 
-    print(f"\nUsing last run (run {last_run}) of {num_runs} total runs.\n")
+    print(f"\nMedian across {num_runs} runs. Speedup: Hodges-Lehmann estimator.\n")
 
     # Build result with TPOT and Speedup columns interleaved
     result = pd.DataFrame(index=tpot.index)
@@ -65,8 +84,19 @@ def print_summary(results_dir: Path):
         if display_name not in tpot.columns:
             continue
         result[display_name] = tpot[display_name]
-        pct = (tpot[display_name] - baseline) / baseline * 100
-        result[f"{display_name} Speedup"] = pct.map(lambda x: f"{x:+.1f}%")
+        # Hodges-Lehmann: median of all pairwise speedup percentages
+        baseline_df = raw_frames["baseline"]
+        fmms_df = raw_frames[variant_key]
+        concurrencies = sorted(baseline_df["max_concurrency"].unique())
+        hl_speedups = {}
+        for conc in concurrencies:
+            b_vals = baseline_df.loc[
+                baseline_df["max_concurrency"] == conc, "median_tpot_ms"
+            ].values
+            f_vals = fmms_df.loc[fmms_df["max_concurrency"] == conc, "median_tpot_ms"].values
+            hl_speedups[conc] = hodges_lehmann_pct(b_vals, f_vals)
+        hl_series = pd.Series(hl_speedups, name=f"{display_name} Speedup")
+        result[f"{display_name} Speedup"] = hl_series.map(lambda x: f"{x:+.1f}%")
     result.index.name = "Concurrency"
 
     print(tabulate(result, headers="keys", tablefmt="grid", floatfmt=".2f"))

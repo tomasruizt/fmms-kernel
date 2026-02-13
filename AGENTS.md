@@ -2,6 +2,8 @@
 
 Development notes and lessons learned while building this project.
 
+**Meta-rule: Continuously update this file.** After every task, write new insights, patterns, and lessons learned into this file. Proactively review and update outdated information — if a timeout was changed, a cache strategy was revised, or a workaround is no longer needed, update the relevant section. This file is the project's living knowledge base.
+
 ## Code style
 
 - **Top-down structure**: Define high-level functions first, helpers below. A reader should encounter the main logic before the details it delegates to.
@@ -395,8 +397,14 @@ Other image build lessons:
 
 ### torch.compile startup overhead
 
-On gpt-oss-120b (B200), `torch.compile` graph compilation takes **~8 minutes** on the first server start (495s for graph compilation + kernel downloads). This exceeds the default `--server-ready-timeout` of 300s. The timeout is set to 600s in the Modal app, but even that may not be enough for the first variant if the compile cache is cold.
+On gpt-oss-120b (B200), `torch.compile` graph compilation takes **~8 minutes** on the first server start (495s for graph compilation + kernel downloads). The `--server-ready-timeout` is set to **1200s (20 min)** in the Modal app to accommodate cold-start compilation.
 
-The second variant (fmms-triton) benefits from the compilation cache warmed by the baseline attempt, so it starts faster (~2-3 min). If the baseline times out, the fmms-triton variant may still succeed.
+The second variant (fmms-triton) benefits from the compilation cache warmed by the baseline, so it starts faster (~2-3 min).
 
-**Workaround**: If baseline keeps timing out, increase `--server-ready-timeout` further or add a warmup step that starts and stops the server once before benchmarking.
+### Caching on Modal volumes
+
+Ephemeral container caches (torch.compile graphs, flashinfer cubins) are lost between runs, causing expensive re-compilation. **Fix: set `XDG_CACHE_HOME` to the Modal volume path.** This is the standard Linux env var for cache directories — both vLLM (`~/.cache/vllm/`) and flashinfer (`~/.cache/flashinfer/`) respect it automatically. Prefer env vars over symlinks for redirecting caches.
+
+The Modal function sets three cache-related env vars:
+- `HF_HOME` → `{volume_path}/hf-cache` (model weights)
+- `XDG_CACHE_HOME` → `{volume_path}/cache` (torch.compile, flashinfer cubins, etc.)

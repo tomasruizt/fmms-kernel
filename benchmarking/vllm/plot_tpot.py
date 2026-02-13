@@ -1,9 +1,10 @@
 """Plot median TPOT vs concurrency for vLLM benchmark results.
 
 Usage:
-    python benchmarking/vllm/plot_tpot.py
+    python benchmarking/vllm/plot_tpot.py [--results-dir <path>]
 """
 
+import argparse
 from itertools import product
 from pathlib import Path
 
@@ -21,14 +22,7 @@ MODELS = [
     "gpt-oss-120b",
 ]
 
-RESULTS_DIR = Path(__file__).parent
-IMGS_DIR = RESULTS_DIR / "imgs"
-IMGS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Concurrency 256 causes KV cache pressure (59% peak, up to 64 waiting reqs on
-# Qwen3-1.7B), inflating TPOT due to scheduling delays rather than sampler cost.
-# Truncate to 128 to keep the comparison fair.
-MAX_CONCURRENCY = 128
+MAX_CONCURRENCY = 256
 
 
 def latest_run(variant_dir: Path) -> Path:
@@ -47,11 +41,11 @@ def load_variant(model_dir: Path, variant_key: str) -> pd.DataFrame | None:
     return pd.read_csv(run_dir / "summary.csv")
 
 
-def load_all_data() -> pd.DataFrame:
+def load_all_data(results_dir: Path) -> pd.DataFrame:
     all_variants = [("baseline", "Baseline (PyTorch compiled)")] + FMMS_VARIANTS
     frames = []
     for model in MODELS:
-        model_dir = RESULTS_DIR / model
+        model_dir = results_dir / model
         if not model_dir.exists():
             print(f"Warning: {model_dir} not found, skipping")
             continue
@@ -103,7 +97,7 @@ def hodges_lehmann_speedups(model_dir: Path, max_concurrency: int) -> pd.DataFra
     return pd.DataFrame(rows)
 
 
-def plot_tpot(df: pd.DataFrame):
+def plot_tpot(df: pd.DataFrame, imgs_dir: Path):
     all_variants = [("baseline", "Baseline (PyTorch compiled)")] + FMMS_VARIANTS
     concurrencies = sorted(df["max_concurrency"].unique())
 
@@ -135,18 +129,18 @@ def plot_tpot(df: pd.DataFrame):
     )
 
     fig.tight_layout()
-    out = IMGS_DIR / "tpot_vs_concurrency.png"
+    out = imgs_dir / "tpot_vs_concurrency.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved to {out}")
 
 
-def plot_speedup(max_concurrency: int):
+def plot_speedup(results_dir: Path, imgs_dir: Path, max_concurrency: int):
     fig, axes = plt.subplots(1, len(MODELS), figsize=(14, 5), sharey=False)
     if len(MODELS) == 1:
         axes = [axes]
 
     for ax, model in zip(axes, MODELS):
-        model_dir = RESULTS_DIR / model
+        model_dir = results_dir / model
         if not model_dir.exists():
             continue
         sdf = hodges_lehmann_speedups(model_dir, max_concurrency)
@@ -182,18 +176,31 @@ def plot_speedup(max_concurrency: int):
             ax.legend_.remove()
 
     fig.tight_layout()
-    out = IMGS_DIR / "speedup_vs_concurrency.png"
+    out = imgs_dir / "speedup_vs_concurrency.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved to {out}")
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Plot TPOT and speedup from vLLM benchmarks")
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path(__file__).parent,
+        help="Directory containing model subdirectories (default: benchmarking/vllm/)",
+    )
+    args = parser.parse_args()
+
+    results_dir = args.results_dir
+    imgs_dir = results_dir / "imgs"
+    imgs_dir.mkdir(parents=True, exist_ok=True)
+
     sns.set_context("talk")
-    df = load_all_data()
+    df = load_all_data(results_dir)
     df = df[df["max_concurrency"] <= MAX_CONCURRENCY]
 
-    plot_tpot(df)
-    plot_speedup(MAX_CONCURRENCY)
+    plot_tpot(df, imgs_dir)
+    plot_speedup(results_dir, imgs_dir, MAX_CONCURRENCY)
 
 
 if __name__ == "__main__":

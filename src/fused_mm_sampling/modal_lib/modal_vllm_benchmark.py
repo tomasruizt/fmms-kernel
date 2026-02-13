@@ -96,6 +96,10 @@ def function(args: Args):
     from .utils import volume_path
 
     os.environ["HF_HOME"] = f"{volume_path}/hf-cache"
+    # Persist torch.compile and flashinfer caches on the Modal volume so they
+    # survive across runs. Without this, every run re-compiles graphs (~8 min)
+    # and re-downloads flashinfer cubins.
+    os.environ["XDG_CACHE_HOME"] = f"{volume_path}/cache"
 
     model_slug = args.model.split("/")[-1]
     is_quick = args.sweep == "quick"
@@ -131,7 +135,7 @@ def function(args: Args):
                 f' --bench-params "{params_file}"'
                 f' --after-bench-cmd "{AFTER_BENCH}"'
                 f" --num-runs {num_runs} --show-stdout"
-                f" --server-ready-timeout 600"
+                f" --server-ready-timeout 1200"
                 f' -o "{out_dir}"'
             )
 

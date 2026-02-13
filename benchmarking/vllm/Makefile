@@ -136,7 +136,13 @@ nsys-fmms-flashinfer:
 nsys-all:
 	$(MAKE) nsys-baseline nsys-fmms-triton
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all engine-stats
+MODAL_GPU := b200
+MODAL_RESULTS_DIR := $(RESULTS_DIR)/../modal-results/vllm-bench-$(MODAL_GPU)
+
+plot-modal:
+	$(PYTHON) "$(RESULTS_DIR)/plot_tpot.py" --results-dir "$(MODAL_RESULTS_DIR)"
+
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all engine-stats plot-modal
 
 $(MODEL_DIR):
 	mkdir -p "$@"
