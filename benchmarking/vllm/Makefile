@@ -13,7 +13,7 @@ BENCH_FLAGS := --dataset-name hf --dataset-path AI-MO/aimo-validation-aime --hf-
 
 AFTER_BENCH := curl -s -X POST http://localhost:8000/reset_prefix_cache && curl -s -X POST http://localhost:8000/reset_mm_cache && curl -s -X POST http://localhost:8000/reset_encoder_cache
 
-SWEEP_FLAGS := --bench-params "$(BENCH_PARAMS)" --after-bench-cmd "$(AFTER_BENCH)" --num-runs 3 --show-stdout
+SWEEP_FLAGS := --bench-params "$(BENCH_PARAMS)" --after-bench-cmd "$(AFTER_BENCH)" --num-runs 5 --show-stdout
 QUICK_BENCH_PARAMS := $(RESULTS_DIR)/quick-bench-params.json
 QUICK_SWEEP_FLAGS := --bench-params "$(QUICK_BENCH_PARAMS)" --after-bench-cmd "$(AFTER_BENCH)" --num-runs 1 --show-stdout
 
@@ -141,7 +141,7 @@ $(MODEL_DIR):
 	mkdir -p "$@"
 
 all: | $(MODEL_DIR)
-	$(MAKE) baseline fmms-triton fmms-flashinfer
+	$(MAKE) baseline fmms-triton
 	$(call collect)
 
 quick: | $(MODEL_DIR)
