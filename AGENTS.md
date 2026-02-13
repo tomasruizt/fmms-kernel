@@ -338,3 +338,65 @@ vLLM's default (baseline) sampling path uses plain PyTorch ops (softmax + multin
 The Triton kernel's `@triton.autotune` originally had `n_hidden_states` in its `key=` parameter. Every unique batch size triggered autotuning (benchmarking all configs). In vLLM, high concurrency produces many unique batch sizes (33, 34, ..., 256), each causing an autotune run **during the benchmark**. This inflated TPOT by 2-10x at concurrency 32+.
 
 **Fix applied**: Replaced `n_hidden_states` with `BLOCK_SIZE_H` in the autotune `key=`, and changed `n_hidden_states` from `tl.constexpr` to a regular runtime int in the kernel signature. `BLOCK_SIZE_H` has only 3 possible values (16, 32, 64), so autotuning runs at most 3 times per (V, D) combination instead of once per unique batch size. All three uses of `n_hidden_states` inside the kernel (`tl.cdiv`, comparison, arithmetic) work fine with runtime values.
+
+## Modal benchmarking (vllm-bench)
+
+End-to-end vLLM benchmarks on Modal cloud GPUs. The root `Makefile` has per-model convenience targets and a composable pipeline:
+
+```bash
+# Per-model full benchmarks (all concurrency levels, 5 runs):
+make modal-vllm-benchmark-full-gpt-oss-120b GPU=b200
+make modal-vllm-benchmark-full-qwen3-1.7b GPU=b200
+make modal-vllm-benchmark-full-qwen3-8b GPU=b200
+
+# Composable pipeline (any model, any sweep):
+make modal-vllm-benchmark GPU=b200 VLLM_MODEL=openai/gpt-oss-120b VLLM_SWEEP=all
+
+# Run a single variant (e.g. rerun just baseline):
+make modal-vllm-benchmark GPU=b200 VLLM_MODEL=openai/gpt-oss-120b VLLM_SWEEP=all VLLM_VARIANTS=baseline
+
+# Steps can be run individually:
+make modal-create-results-vllm-bench GPU=b200 VLLM_MODEL=...  # runs on Modal
+make modal-get-results-vllm-bench GPU=b200                     # downloads from volume
+make modal-collect-results-vllm-bench GPU=b200 VLLM_MODEL=...  # runs collect_results.py locally
+```
+
+**Key files**:
+- `src/fused_mm_sampling/modal_lib/modal_vllm_benchmark.py` — Modal app that runs `vllm bench sweep serve` for each variant
+- `benchmarking/vllm/bench-params.json` / `quick-bench-params.json` — single source of truth for sweep parameters (shared between local and Modal benchmarks)
+- `benchmarking/vllm/collect_results.py` — result collection, run locally after downloading
+- `benchmarking/vllm/parse_engine_stats.py` — works with both `sweep.log` and Modal log files (engine stats lines are the same format)
+
+**Results location**: `benchmarking/modal-results/vllm-bench-{GPU}{POSTFIX}/` with per-model subdirectories containing `baseline/`, `fmms-triton/`, `logs/`, and `results.txt`.
+
+**Makefile variables**:
+- `GPU` — Modal GPU type (default: `b200`)
+- `VLLM_MODEL` — HuggingFace model ID (default: `openai/gpt-oss-120b`)
+- `VLLM_SWEEP` — `quick` (1 concurrency, 1 run, `--enforce-eager`) or `all` (full sweep, 5 runs)
+- `VLLM_VARIANTS` — comma-separated variant filter, e.g. `baseline` or `fmms-triton`. Empty = all variants.
+- `POSTFIX` — suffix for result directory (for A/B comparisons)
+
+**Logs**: Timestamped per-model in `<model_slug>/logs/<YYYYMMDD_HHMMSS>.txt`. Multiple parallel runs won't collide.
+
+### Modal vLLM image build
+
+The image uses `pytorch/pytorch:2.10.0-cuda13.0-cudnn9-devel` as base. Key pitfall: vLLM's `VLLM_USE_PRECOMPILED=1` installs precompiled `.so` files built for torch 2.10.0, but vLLM's metadata pins `torch==2.9.1`. The image build works around this with a two-step install:
+
+1. `cd /opt/vllm && VLLM_USE_PRECOMPILED=1 uv pip install --system -e '.[bench]'` — installs vLLM with torch 2.9.1
+2. `uv pip install --system 'torch==2.10.0' 'torchvision>=0.25' 'torchaudio>=2.10'` — force-upgrades torch to match the precompiled `.so`
+
+Without step 2, you get an ABI mismatch: `undefined symbol: _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_jb`.
+
+Other image build lessons:
+- `.pip_install("uv")` fails on Ubuntu 24.04 (PEP 668). Use `.run_commands("pip install --break-system-packages uv")`.
+- `add_local_dir()` / `add_local_file()` require `copy=True` when subsequent build steps need the files.
+- B200 GPU requires CUDA 13.0 / sm_100. PyTorch 2.9.1 only supports up to sm_90, so the 2.10.0 base image is necessary.
+- `HF_TOKEN` is passed via `modal.Secret.from_dict({"HF_TOKEN": os.environ["HF_TOKEN"]})`. The code intentionally fails if `HF_TOKEN` is not set locally.
+
+### torch.compile startup overhead
+
+On gpt-oss-120b (B200), `torch.compile` graph compilation takes **~8 minutes** on the first server start (495s for graph compilation + kernel downloads). This exceeds the default `--server-ready-timeout` of 300s. The timeout is set to 600s in the Modal app, but even that may not be enough for the first variant if the compile cache is cold.
+
+The second variant (fmms-triton) benefits from the compilation cache warmed by the baseline attempt, so it starts faster (~2-3 min). If the baseline times out, the fmms-triton variant may still succeed.
+
+**Workaround**: If baseline keeps timing out, increase `--server-ready-timeout` further or add a warmup step that starts and stops the server once before benchmarking.
