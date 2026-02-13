@@ -239,6 +239,48 @@ python speed_test.py --name naive-pt
 make triton-benchmark
 ```
 
+## End-to-End vLLM Benchmarks
+
+The kernel microbenchmarks above measure the FMMS kernel in isolation.
+To measure end-to-end impact, I integrated FMMS into vLLM ([branch](https://github.com/tomasruizt/vllm/tree/feature/fmms-sampler)) and benchmarked median time per output token (TPOT) across concurrency levels using `vllm bench sweep`.
+Each configuration is run 5 times; the table shows the median TPOT (lower is better) and median speedup across runs.
+All results are on a B200 GPU with PyTorch 2.10.0 and CUDA 13.0, run on Modal.
+
+### Qwen3-1.7B (V=151,936, d=2,048)
+
+| Concurrency | Baseline (ms) | FMMS Triton (ms) | TPOT Reduction |
+| ----------- | ------------- | ---------------- | -------------- |
+| 1           | 2.25          | 2.00             | -10.8%         |
+| 2           | 2.14          | 1.87             | -12.6%         |
+| 4           | 2.15          | 1.84             | -14.5%         |
+| 8           | 2.19          | 1.86             | -15.2%         |
+| 16          | 2.24          | 1.85             | -17.7%         |
+| 32          | 2.52          | 2.28             | -10.0%         |
+| 64          | 3.47          | 2.82             | -18.7%         |
+| 128         | 4.21          | 4.05             | -4.4%          |
+| 256         | 15.43         | 14.28            | -7.6%          |
+
+FMMS reduces TPOT by 10-19% across all concurrency levels on Qwen3-1.7B.
+The small hidden dimension (d=2,048) makes the LM head matmul strongly memory-bound, so fusion has a large impact.
+Peak improvement is -18.7% at concurrency 64.
+
+### gpt-oss-120b (V=201,088, d=2,880)
+
+| Concurrency | Baseline (ms) | FMMS Triton (ms) | TPOT Reduction |
+| ----------- | ------------- | ---------------- | -------------- |
+| 1           | 3.45          | 3.29             | -4.3%          |
+| 2           | 4.14          | 3.99             | -3.6%          |
+| 4           | 5.28          | 5.11             | -3.1%          |
+| 8           | 7.30          | 7.12             | -2.5%          |
+| 16          | 9.94          | 9.77             | -1.8%          |
+| 32          | 13.34         | 13.39            | +0.6%          |
+| 64          | 17.80         | 17.50            | -1.7%          |
+| 128         | 23.39         | 23.25            | -0.6%          |
+| 256         | 27.43         | 27.06            | -1.4%          |
+
+On gpt-oss-120b, FMMS reduces TPOT by 2-4% at low concurrency (1-8).
+The improvement is smaller than Qwen3-1.7B because the LM head matmul is a smaller fraction of the total decode step in a 120B-parameter model.
+
 ## Sampling Quality (GSM8K)
 
 The Gumbel-max trick samples exactly from the categorical distribution. It is mathematically equivalent to softmax + multinomial, not an approximation.

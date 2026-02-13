@@ -271,6 +271,15 @@ Output: `benchmarking/vllm/profiles/nsight/<GPU>/<model_slug>/`.
 - **`sudo -E` is required** to pass environment variables (like `VLLM_USE_FMMS_SAMPLER`, `VLLM_NVTX_SCOPES_FOR_PROFILING`) through to the vllm process. Without `-E`, the FMMS sampler won't activate.
 - **`setsid`** is used to put nsys in its own session, so the kill signal doesn't propagate back to the make process.
 
+## Modal profiles
+
+Two Modal workspaces are configured. Switch with `modal profile activate <name>`.
+
+- **`tomasruizt`** (personal): Used for vllm-bench runs on gpt-oss-120b and Qwen3-1.7B. The `fused-mm-sample` volume here holds these results.
+- **`lmu-css`** (default): Used for triton-bench runs and vllm-bench runs on Qwen3-8B. The `fused-mm-sample` volume here holds these results.
+
+Check the active profile with `modal profile list` (the `•` marker shows the active one). When downloading results with `make modal-get-results-*`, ensure the correct profile is active or the volume lookup will fail silently (no matching directory).
+
 ## Modal benchmarking (triton-bench)
 
 Kernel microbenchmarks run on Modal cloud GPUs. The root `Makefile` has a three-step pipeline:
