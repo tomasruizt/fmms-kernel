@@ -239,11 +239,18 @@ python speed_test.py --name naive-pt
 make triton-benchmark
 ```
 
-## TODO
+## Sampling Quality (GSM8K)
 
-- [ ] **vLLM integration**: Benchmark FMMS end-to-end inside vLLM to measure the impact on time-per-output-token (TPOT).
-A prototype integration exists on a private branch (see [`findings/vllm-integration.md`](findings/vllm-integration.md)).
-- [ ] **Sampling quality**: Run GSM8K with and without FMMS to verify that fused sampling does not degrade model accuracy.
+The Gumbel-max trick samples exactly from the categorical distribution. It is mathematically equivalent to softmax + multinomial, not an approximation.
+To showcase this, I integrated FMMS in vLLM and ran the GSM8K benchmark (1,319 questions, 0-shot CoT) via [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) on Qwen3-1.7B, with answers graded by an LLM judge. Results:
+
+| Variant                 | Accuracy | 95% CI         |
+| ----------------------- | -------- | -------------- |
+| Baseline (vLLM default) | 89.6%    | [87.9%, 91.2%] |
+| FMMS Triton             | 89.4%    | [87.7%, 91.0%] |
+
+The difference is +0.2 percentage points (p=0.776, paired bootstrap), not statistically significant, meaning that FMMS does not degrade model accuracy.
+For full methodology and pairwise comparisons, see [`benchmarking/vllm/README.md`](benchmarking/vllm/README.md#quality-evaluation-gsm8k).
 
 ## Profiling
 

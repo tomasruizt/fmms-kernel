@@ -12,11 +12,12 @@ Development notes and lessons learned while building this project.
 
 ## Writing style (README, blog post, docs)
 
-- Single author project — never use "we", use "I" or passive voice.
+- Single author project. Never use "we". Prefer "I" + active voice, but use passive voice when it sounds more natural.
 - One sentence per line in prose sections, to make git diffs cleaner.
 - Don't write `torch.compile`-d or `torch.compiled` — say "torch compiled".
 - Avoid jargon like "unfused" or "lean" when simpler words work ("baseline", "Gumbel-max kernel").
 - When stating speedup ranges, verify them against the actual table data. Use "generally outperforms" rather than "always" when there are exceptions.
+- Never use em dashes (—). Use periods, commas, or parentheses instead.
 
 ## Blog post
 
