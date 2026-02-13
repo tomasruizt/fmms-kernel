@@ -90,7 +90,7 @@ variants = os.getenv("VARIANTS", "")
     image=make_vllm_image(),
     volumes=make_volumes(),
     secrets=[modal.Secret.from_dict({"HF_TOKEN": os.environ["HF_TOKEN"]})],
-    timeout=60 * 60,
+    timeout=2 * 60 * 60,
 )
 def function(args: Args):
     from .utils import volume_path
