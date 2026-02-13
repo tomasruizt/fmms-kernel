@@ -10,21 +10,8 @@ import modal
 
 from .utils import make_app, make_volumes
 
-BENCH_PARAMS = [
-    {"max_concurrency": 1, "num_prompts": 10, "request_rate": 1},
-    {"max_concurrency": 2, "num_prompts": 20, "request_rate": 2},
-    {"max_concurrency": 4, "num_prompts": 40, "request_rate": 4},
-    {"max_concurrency": 8, "num_prompts": 80, "request_rate": 8},
-    {"max_concurrency": 16, "num_prompts": 160, "request_rate": 16},
-    {"max_concurrency": 32, "num_prompts": 320, "request_rate": 32},
-    {"max_concurrency": 64, "num_prompts": 640, "request_rate": 64},
-    {"max_concurrency": 128, "num_prompts": 1280, "request_rate": 128},
-    {"max_concurrency": 256, "num_prompts": 2560, "request_rate": 256},
-]
-
-QUICK_BENCH_PARAMS = [
-    {"max_concurrency": 1, "num_prompts": 2, "request_rate": 1},
-]
+_repo_root = Path(__file__).resolve().parents[3]
+_bench_params_dir = _repo_root / "benchmarking" / "vllm"
 
 SERVE_FLAGS = "--max-model-len 1024 --no-enable-prefix-caching --uvicorn-log-level warning"
 BENCH_FLAGS = (
@@ -42,9 +29,6 @@ ALL_VARIANTS = {
     "baseline": {},
     "fmms-triton": {"VLLM_USE_FMMS_SAMPLER": "1", "VLLM_FMMS_PROVIDER": "fused-triton"},
 }
-
-
-_repo_root = Path(__file__).resolve().parents[3]
 
 
 def make_vllm_image() -> modal.Image:
@@ -90,6 +74,7 @@ class Args:
     tgt_dir: str = "/vol-fused-mm-sample/vllm-bench"
     num_runs: int = 5
     variants: str = ""  # comma-separated, e.g. "baseline,fmms-triton". Empty = all.
+    bench_params_json: str = ""  # JSON string with bench params (read from file locally)
 
 
 app = make_app()
@@ -114,7 +99,7 @@ def function(args: Args):
 
     model_slug = args.model.split("/")[-1]
     is_quick = args.sweep == "quick"
-    params = QUICK_BENCH_PARAMS if is_quick else BENCH_PARAMS
+    params = json.loads(args.bench_params_json)
     num_runs = 1 if is_quick else args.num_runs
     enforce_eager = "--enforce-eager" if is_quick else ""
 
@@ -173,5 +158,13 @@ def function(args: Args):
 
 @app.local_entrypoint()
 def main():
-    args = Args(model=model, sweep=sweep, tgt_dir=tgt_dir, variants=variants)
+    params_file = "quick-bench-params.json" if sweep == "quick" else "bench-params.json"
+    bench_params_json = (_bench_params_dir / params_file).read_text()
+    args = Args(
+        model=model,
+        sweep=sweep,
+        tgt_dir=tgt_dir,
+        variants=variants,
+        bench_params_json=bench_params_json,
+    )
     function.remote(args=args)
