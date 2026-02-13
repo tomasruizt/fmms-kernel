@@ -17,9 +17,10 @@ SWEEP_FLAGS := --bench-params "$(BENCH_PARAMS)" --after-bench-cmd "$(AFTER_BENCH
 QUICK_BENCH_PARAMS := $(RESULTS_DIR)/quick-bench-params.json
 QUICK_SWEEP_FLAGS := --bench-params "$(QUICK_BENCH_PARAMS)" --after-bench-cmd "$(AFTER_BENCH)" --num-runs 1 --show-stdout
 
-# After each sweep, move the log into the latest timestamped results directory.
+# Move the .tmp log into the latest timestamped results directory.
+# Called with ; after the sweep so it runs even if the sweep exits non-zero.
 define move_log
-	mv "$(1).tmp" "$$(ls -td $(2)/*/ | head -1)/sweep.log"
+mv "$(1).tmp" "$$(ls -td $(2)/*/ | head -1)/sweep.log" 2>/dev/null || true
 endef
 
 define collect
@@ -154,7 +155,7 @@ baseline:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/baseline" \
-		2>&1 | tee "$(MODEL_DIR)/baseline.tmp"
+		2>&1 | tee "$(MODEL_DIR)/baseline.tmp"; \
 	$(call move_log,$(MODEL_DIR)/baseline,$(MODEL_DIR)/baseline)
 
 fmms-triton:
@@ -163,7 +164,7 @@ fmms-triton:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/fmms-triton" \
-		2>&1 | tee "$(MODEL_DIR)/fmms-triton.tmp"
+		2>&1 | tee "$(MODEL_DIR)/fmms-triton.tmp"; \
 	$(call move_log,$(MODEL_DIR)/fmms-triton,$(MODEL_DIR)/fmms-triton)
 
 fmms-flashinfer:
@@ -172,7 +173,7 @@ fmms-flashinfer:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/fmms-flashinfer" \
-		2>&1 | tee "$(MODEL_DIR)/fmms-flashinfer.tmp"
+		2>&1 | tee "$(MODEL_DIR)/fmms-flashinfer.tmp"; \
 	$(call move_log,$(MODEL_DIR)/fmms-flashinfer,$(MODEL_DIR)/fmms-flashinfer)
 
 quick-baseline:
@@ -181,7 +182,7 @@ quick-baseline:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(QUICK_SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/baseline" \
-		2>&1 | tee "$(MODEL_DIR)/baseline.tmp"
+		2>&1 | tee "$(MODEL_DIR)/baseline.tmp"; \
 	$(call move_log,$(MODEL_DIR)/baseline,$(MODEL_DIR)/baseline)
 
 quick-fmms-triton:
@@ -190,7 +191,7 @@ quick-fmms-triton:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(QUICK_SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/fmms-triton" \
-		2>&1 | tee "$(MODEL_DIR)/fmms-triton.tmp"
+		2>&1 | tee "$(MODEL_DIR)/fmms-triton.tmp"; \
 	$(call move_log,$(MODEL_DIR)/fmms-triton,$(MODEL_DIR)/fmms-triton)
 
 quick-fmms-flashinfer:
@@ -199,7 +200,7 @@ quick-fmms-flashinfer:
 		--bench-cmd "$(VLLM) bench serve $(BENCH_FLAGS)" \
 		$(QUICK_SWEEP_FLAGS) \
 		-o "$(MODEL_DIR)/fmms-flashinfer" \
-		2>&1 | tee "$(MODEL_DIR)/fmms-flashinfer.tmp"
+		2>&1 | tee "$(MODEL_DIR)/fmms-flashinfer.tmp"; \
 	$(call move_log,$(MODEL_DIR)/fmms-flashinfer,$(MODEL_DIR)/fmms-flashinfer)
 
 eval-baseline:

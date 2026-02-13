@@ -2,37 +2,66 @@
 
 ## Setup
 
-- **Model**: Qwen/Qwen3-1.7B
-- **GPU**: NVIDIA RTX 3090
 - **vLLM**: v1 engine, `--max-model-len 1024`, `--no-enable-prefix-caching`
 - **Dataset**: AI-MO/aimo-validation-aime (math reasoning), `--hf-output-len 256`
 - **Sampling**: `temperature=0.6`, `top_k=-1`, `top_p=1.0`
-- **Tool**: `vllm bench sweep serve` with `--num-runs 1`
+- **Tool**: `vllm bench sweep serve` with `--num-runs 3`
 - **Sweep params**: `num_prompts = 10 * concurrency`, `request_rate = concurrency`
+- **Concurrency levels**: 1, 2, 4, 8, 16, 32, 64, 128, 256
 
 ## Results
 
-Three variants tested:
-- **Baseline**: vLLM default (`compute_logits` via cuBLAS + FlashInfer sampler)
+Two variants tested:
+
+- **Baseline**: vLLM default (`compute_logits` via cuBLAS + PyTorch compiled sampling)
 - **FMMS Triton**: Fused matmul+sampling Triton kernel (`fused-triton` provider)
-- **FMMS FlashInfer**: Unfused control — matmul + FlashInfer top-k/top-p sampling through FMMS integration path (`flashinfer:top_k_top_p_sampling_from_logits` provider)
 
-### Median TPOT (ms)
+### Qwen3-1.7B (RTX 3090)
 
-| Concurrency | Baseline | FMMS Triton | FMMS FlashInfer |
+Median TPOT (ms), last of 3 runs:
+
+| Concurrency | Baseline | FMMS Triton | vs Baseline |
 |---|---|---|---|
-| 1 | 5.24 | 5.11 | 5.30 |
-| 32 | 8.95 | 8.79 | 8.93 |
+| 1 | 5.25 | 5.11 | -2.7% |
+| 2 | 5.72 | 5.55 | -3.0% |
+| 4 | 5.87 | 5.70 | -2.9% |
+| 8 | 6.25 | 6.06 | -3.1% |
+| 16 | 7.34 | 7.07 | -3.6% |
+| 32 | 9.03 | 8.45 | -6.4% |
+| 64 | 11.79 | 11.20 | -5.0% |
+| 128 | 19.04 | 18.33 | -3.7% |
+| 256 | 38.16 | 36.48 | -4.4% |
+
+### gpt-oss-120b (H100 PCIe)
+
+Median TPOT (ms), last of 3 runs:
+
+| Concurrency | Baseline | FMMS Triton | vs Baseline |
+|---|---|---|---|
+| 1 | 5.90 | 5.76 | -2.4% |
+| 2 | 6.96 | 6.79 | -2.4% |
+| 4 | 9.68 | 9.49 | -2.0% |
+| 8 | 12.56 | 12.34 | -1.8% |
+| 16 | 17.24 | 17.14 | -0.5% |
+| 32 | 23.36 | 23.05 | -1.3% |
+| 64 | 31.48 | 33.51 | +6.5% |
+| 128 | 40.98 | 40.82 | -0.4% |
+| 256 | 51.36 | 51.29 | -0.1% |
+
+Note: gpt-oss-120b shows high run-to-run variance at concurrency 64+ (e.g. baseline runs at concurrency 64: 28.87, 33.88, 31.48 ms).
+The percentages above reflect a single run and should be interpreted with caution at high concurrency.
+
+![TPOT vs Concurrency](tpot_vs_concurrency.png)
 
 ## Analysis
 
-All three variants perform equivalently at both low and high concurrency. FMMS Triton matches baseline TPOT within noise (~1%).
+**Qwen3-1.7B**: FMMS Triton is consistently 3-6% faster than the baseline across all concurrency levels.
 
-An earlier version of the integration used `temperature[0].item()` to extract a scalar from the per-request temperature tensor. This `.item()` call caused a CPU-GPU synchronization on every decode step, which compounded at high concurrency (TPOT was 18.66ms vs 8.98ms baseline at concurrency 32). Replacing it with `temperature[0]` (keeping the value as a scalar tensor) eliminated the regression.
-
+**gpt-oss-120b**: At low concurrency (1-32), FMMS Triton is 1-2% faster.
+At high concurrency (64+), results are noisy due to run-to-run variance and the differences are not reliable.
 ## Quality evaluation (GSM8K)
 
-We use [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) with the `gsm8k_cot_zeroshot` task to verify that FMMS sampling does not degrade model quality compared to the vLLM baseline.
+[lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) with the `gsm8k_cot_zeroshot` task is used to verify that FMMS sampling does not degrade model quality compared to the vLLM baseline.
 
 ### Expected performance
 

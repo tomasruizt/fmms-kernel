@@ -319,6 +319,8 @@ End-to-end vLLM benchmarks live in `benchmarking/vllm/`. Key files:
 - `Makefile` — `make all` (full sweep, 3 runs) and `make quick` (smoke test, 1 run, `--enforce-eager`). Supports `MODEL=` override for different models.
 - `bench-params.json` / `quick-bench-params.json` — sweep parameters (concurrency levels, num_prompts, request_rate)
 - `collect_results.py` — reads `summary.csv` from each variant's latest timestamped run, prints summary table (last run only) and per-run breakdown. Usage: `python collect_results.py <model_dir>`
+- `parse_engine_stats.py` — extracts KV cache occupancy, running/waiting request counts from `sweep.log` files. Parses the periodic engine stats lines emitted every 10s by vLLM. Usage: `python parse_engine_stats.py <sweep.log> [--by-concurrency]`. The `--by-concurrency` flag aggregates across runs per concurrency level. Useful for diagnosing KV cache pressure at high batch sizes.
+- `plot_tpot.py` — plots median TPOT vs concurrency for all models, using `sns.lineplot` with shading for run-to-run variance. Output: `tpot_vs_concurrency.png`.
 - Results are organized as `<model_slug>/baseline/`, `<model_slug>/fmms-triton/`, `<model_slug>/fmms-flashinfer/`
 
 ### Baseline sampler is plain PyTorch, not flashinfer
