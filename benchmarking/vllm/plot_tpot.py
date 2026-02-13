@@ -22,6 +22,8 @@ MODELS = [
 ]
 
 RESULTS_DIR = Path(__file__).parent
+IMGS_DIR = RESULTS_DIR / "imgs"
+IMGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Concurrency 256 causes KV cache pressure (59% peak, up to 64 waiting reqs on
 # Qwen3-1.7B), inflating TPOT due to scheduling delays rather than sampler cost.
@@ -133,7 +135,7 @@ def plot_tpot(df: pd.DataFrame):
     )
 
     fig.tight_layout()
-    out = RESULTS_DIR / "tpot_vs_concurrency.png"
+    out = IMGS_DIR / "tpot_vs_concurrency.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved to {out}")
 
@@ -180,7 +182,7 @@ def plot_speedup(max_concurrency: int):
             ax.legend_.remove()
 
     fig.tight_layout()
-    out = RESULTS_DIR / "speedup_vs_concurrency.png"
+    out = IMGS_DIR / "speedup_vs_concurrency.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     print(f"Saved to {out}")
 

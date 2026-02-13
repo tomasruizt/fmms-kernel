@@ -146,7 +146,7 @@ all: | $(MODEL_DIR)
 	$(call collect)
 
 quick: | $(MODEL_DIR)
-	$(MAKE) quick-baseline quick-fmms-triton quick-fmms-flashinfer
+	$(MAKE) quick-baseline quick-fmms-triton
 	$(call collect)
 
 baseline:
