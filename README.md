@@ -242,7 +242,9 @@ make triton-benchmark
 ## Sampling Quality (GSM8K)
 
 The Gumbel-max trick samples exactly from the categorical distribution. It is mathematically equivalent to softmax + multinomial, not an approximation.
-To showcase this, I integrated FMMS in vLLM and ran the GSM8K benchmark (1,319 questions, 0-shot CoT) via [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) on Qwen3-1.7B, with answers graded by an LLM judge. Results:
+The unit tests verify this with a chi-squared goodness-of-fit test comparing empirical samples against the theoretical softmax probabilities (see [`tests/test_core.py`](tests/test_core.py)).
+
+As an end-to-end check, I integrated FMMS in vLLM and ran the GSM8K benchmark (1,319 questions, 0-shot CoT) via [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) on Qwen3-1.7B, with answers graded by an LLM judge. Results:
 
 | Variant                 | Accuracy | 95% CI         |
 | ----------------------- | -------- | -------------- |
