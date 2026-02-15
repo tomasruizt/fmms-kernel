@@ -22,6 +22,13 @@ modal-create-results-triton-bench:
 modal-plot-triton-bench:
 	python benchmarking/plot-triton-bench.py --tgt_dir $(TRITON_BENCH_DIR)
 
+TRITON_BENCH_GPUS := b300 b200 h200 h100!
+
+plot-all:
+	$(foreach gpu,$(TRITON_BENCH_GPUS),\
+		python benchmarking/plot-triton-bench.py --tgt_dir benchmarking/modal-results/triton-bench-$(gpu) &&) true
+	python benchmarking/vllm/plot_tpot.py --results-dir $(VLLM_BENCH_DIR)
+
 modal-example:
 	modal run -m src.fused_mm_sampling.modal_lib.modal_example
 

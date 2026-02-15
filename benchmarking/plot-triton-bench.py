@@ -79,7 +79,7 @@ def read_gpu_name(folder: Path) -> str | None:
 
 
 def plot_batch_scaling(bdf_long: pd.DataFrame):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 3))
     palette = _provider_palette(bdf_long["provider"])
 
     sns.lineplot(
@@ -95,7 +95,12 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax1.set_yscale("log")
     unique_n_hidden = sorted(bdf_long["n_hidden_states"].unique())
     ax1.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
-    ax1.grid(alpha=0.5)
+    ax1.xaxis.set_minor_locator(plt.NullLocator())
+    yfmt = plt.ScalarFormatter()
+    yfmt.set_scientific(False)
+    ax1.yaxis.set_major_formatter(yfmt)
+    ax1.yaxis.set_minor_formatter(yfmt)
+    ax1.grid(alpha=0.5, which="both")
     ax1.set_xlabel("Inference batch size")
     ax1.set_ylabel("Time (ms)")
     ax1.legend_.remove()
@@ -111,13 +116,21 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     )
     ax2.set_xscale("log")
     ax2.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
+    ax2.xaxis.set_minor_locator(plt.NullLocator())
     ax2.grid(alpha=0.5)
     ax2.set_xlabel("Inference batch size")
     ax2.set_ylabel("Samples/ms")
+    ax2.legend_.remove()
 
-    ncol = 1
-    bbox_to_anchor = (1.05, 1)
-    sns.move_legend(ax2, "upper left", title="Method", bbox_to_anchor=bbox_to_anchor, ncol=ncol)
+    handles, labels = ax1.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        title="Method",
+        bbox_to_anchor=(0.5, 1.25),
+        ncol=2,
+    )
 
     fig.tight_layout()
     return ax1
@@ -229,7 +242,7 @@ def plot_roofline(
     df["ai"] = df["flops"] / df["bytes"]  # arithmetic intensity (FLOP/byte)
     df["achieved_tflops"] = df["flops"] / (df["time[ms]"] / 1000) / 1e12
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(7, 4))
 
     # Roofline ceiling
     ridge_ai = peak_compute_tflops / (peak_bw_gbs / 1000)  # TFLOP/s / (TB/s) = FLOP/byte
@@ -285,7 +298,7 @@ def plot_roofline(
     ax.set_ylabel("Achieved Performance (TFLOP/s)")
     ax.minorticks_off()
     ax.grid(True, alpha=0.3, which="both")
-    ax.legend(loc="lower right", fontsize=8)
+    ax.legend(loc="lower right", fontsize=9)
     fig.tight_layout()
     return ax
 
@@ -352,7 +365,7 @@ def create_and_triton_bench_plots(folder: Path):
         bdf_long = assign_col_samples_per_ms(bdf_long)
 
         ax = plot_batch_scaling(bdf_long)
-        ax.figure.savefig(tgt_folder / f"batch-scaling-{case}.png", dpi=300)
+        ax.figure.savefig(tgt_folder / f"batch-scaling-{case}.png", dpi=300, bbox_inches="tight")
         plt.close(ax.figure)
 
         # Memory throughput plot
