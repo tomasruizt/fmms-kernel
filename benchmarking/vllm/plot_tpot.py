@@ -19,6 +19,7 @@ FMMS_VARIANTS = [
 
 MODELS = [
     "Qwen3-1.7B",
+    "Qwen3-8B",
     "gpt-oss-120b",
 ]
 
