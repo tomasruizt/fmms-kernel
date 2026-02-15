@@ -17,6 +17,12 @@ FMMS_VARIANTS = [
     ("fmms-triton", "FMMS (Triton)"),
 ]
 
+# Consistent color palette: FMMS stands out in bold red, baseline is gray.
+VARIANT_COLORS: dict[str, str] = {
+    "Baseline (PyTorch compiled)": "#7f7f7f",  # gray
+    "FMMS (Triton)": "#d62728",  # bold red
+}
+
 MODELS = [
     "Qwen3-1.7B",
     "Qwen3-8B",
@@ -108,7 +114,16 @@ def plot_tpot(df: pd.DataFrame, imgs_dir: Path):
 
     for ax, model in zip(axes, MODELS):
         mdf = df[df["model"] == model]
-        sns.lineplot(mdf, x="max_concurrency", y="median_tpot_ms", hue="variant", marker="o", ax=ax)
+        palette = {v: VARIANT_COLORS[v] for v in mdf["variant"].unique()}
+        sns.lineplot(
+            mdf,
+            x="max_concurrency",
+            y="median_tpot_ms",
+            hue="variant",
+            marker="o",
+            ax=ax,
+            palette=palette,
+        )
 
         ax.set_title(model)
         ax.set_xlabel("Batch Size")
@@ -151,18 +166,20 @@ def plot_speedup(results_dir: Path, imgs_dir: Path, max_concurrency: int):
 
         for variant in sdf["variant"].unique():
             vdf = sdf[sdf["variant"] == variant]
+            color = VARIANT_COLORS[variant]
             medians = []
             for conc in concurrencies:
                 vals = vdf.loc[vdf["max_concurrency"] == conc, "speedup_pct"].values
                 medians.append(np.median(vals))
 
-            ax.plot(concurrencies, medians, marker="o", zorder=3, label=variant)
+            ax.plot(concurrencies, medians, marker="o", zorder=3, label=variant, color=color)
             ax.scatter(
                 vdf["max_concurrency"],
                 vdf["speedup_pct"],
                 alpha=0.35,
                 s=20,
                 zorder=2,
+                color=color,
             )
 
         ax.set_title(model)

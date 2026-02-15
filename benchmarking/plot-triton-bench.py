@@ -49,6 +49,23 @@ GPU_PEAK_COMPUTE_TFLOPS: dict[str, float] = {
 }
 
 
+# Consistent color palette: FMMS stands out, baselines are muted.
+PROVIDER_COLORS: dict[str, str] = {
+    "FMMS (Triton)": "#d62728",  # bold red
+    "FMMS (Helion)": "#e45756",  # lighter red
+    "FMMS (Triton NoNoise)": "#ff7f0e",  # orange
+    "Naive PyTorch Compiled": "#7f7f7f",  # gray
+    "flashinfer:top_k_top_p_sampling_from_logits": "#1f77b4",  # muted blue
+    "flashinfer:sampling_from_logits": "#aec7e8",  # light blue
+}
+
+
+def _provider_palette(providers: pd.Series | list[str]) -> dict[str, str]:
+    """Return a color mapping for the providers present in the data."""
+    unique = providers if isinstance(providers, list) else providers.unique()
+    return {p: PROVIDER_COLORS[p] for p in unique}
+
+
 def read_gpu_name(folder: Path) -> str | None:
     """Parse the GPU name from the 'GPU: ...' line in logs.txt."""
     logs = folder / "logs.txt"
@@ -63,8 +80,17 @@ def read_gpu_name(folder: Path) -> str | None:
 
 def plot_batch_scaling(bdf_long: pd.DataFrame):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4))
+    palette = _provider_palette(bdf_long["provider"])
 
-    sns.lineplot(bdf_long, x="n_hidden_states", y="time[ms]", hue="provider", marker="o", ax=ax1)
+    sns.lineplot(
+        bdf_long,
+        x="n_hidden_states",
+        y="time[ms]",
+        hue="provider",
+        marker="o",
+        ax=ax1,
+        palette=palette,
+    )
     ax1.set_xscale("log")
     ax1.set_yscale("log")
     unique_n_hidden = sorted(bdf_long["n_hidden_states"].unique())
@@ -74,7 +100,15 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax1.set_ylabel("Time (ms)")
     ax1.legend_.remove()
 
-    sns.lineplot(bdf_long, x="n_hidden_states", y="samples/ms", hue="provider", marker="o", ax=ax2)
+    sns.lineplot(
+        bdf_long,
+        x="n_hidden_states",
+        y="samples/ms",
+        hue="provider",
+        marker="o",
+        ax=ax2,
+        palette=palette,
+    )
     ax2.set_xscale("log")
     ax2.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
     ax2.grid(alpha=0.5)
@@ -93,11 +127,13 @@ def plot_relative_performance(
     bdf_rel_long: pd.DataFrame, ref_method: str, show_providers: list[str]
 ) -> None:
     plot_df = bdf_rel_long.query("provider in @show_providers")
+    palette = _provider_palette(show_providers)
     ax = sns.barplot(
         plot_df,
         x="n_hidden_states",
         y="relative-perf",
         hue="provider",
+        palette=palette,
     )
     ax.grid(alpha=0.5, axis="y")
     ncol = 1  # min(len(show_providers), 2)
@@ -132,12 +168,14 @@ def assign_col_mem_throughput(df: pd.DataFrame, vocab_size: int, hidden_size: in
 
 
 def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = None):
+    palette = _provider_palette(bdf_long["provider"])
     ax = sns.lineplot(
         bdf_long,
         x="n_hidden_states",
         y="mem_throughput[GB/s]",
         hue="provider",
         marker="o",
+        palette=palette,
     )
 
     if peak_bw_gbs is not None:
@@ -216,8 +254,9 @@ def plot_roofline(
 
     # Data points per provider
     providers = df["provider"].unique()
-    palette = sns.color_palette(n_colors=len(providers))
-    for idx, (color, provider) in enumerate(zip(palette, providers)):
+    palette = _provider_palette(providers)
+    for idx, provider in enumerate(providers):
+        color = palette[provider]
         pdf = df[df["provider"] == provider]
         ax.plot(
             pdf["ai"],
@@ -237,7 +276,7 @@ def plot_roofline(
                     xytext=(5, -10),
                     textcoords="offset points",
                     fontsize=10,
-                    color=color,
+                    color="black",
                 )
 
     ax.set_xscale("log")
