@@ -19,7 +19,7 @@ device = torch.device("cuda")
 # See findings/lm-head-configurations.md for details.
 BENCHMARK_CASES = {
     "qwen3-1.7b": {"vocab_size": 151_936, "hidden_size": 2_048},  # Qwen3 1.7B
-    "small": {"vocab_size": 128_256, "hidden_size": 4_096},  # Llama 3 8B, Qwen3 8B
+    "small": {"vocab_size": 151_936, "hidden_size": 4_096},  # Qwen3 8B, Qwen3-235B MoE
     "large": {"vocab_size": 128_256, "hidden_size": 8_192},  # Llama 3 70B, DeepSeek V3
     "gpt-oss-120b": {"vocab_size": 201_088, "hidden_size": 2_880},  # GPT-OSS 120B
 }

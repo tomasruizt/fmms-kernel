@@ -23,7 +23,7 @@ Development notes and lessons learned while building this project.
 
 The blog post lives at `~/code/tomasruizt.github.io/tomas-blog/posts/07_fused-mm-sample/index.qmd` (Quarto format).
 It should be kept in sync with the README benchmark numbers.
-The blog uses only the "large" config (V=128,256, d=8,192) for its tables.
+The blog uses both "large" (V=128,256, d=8,192) and "small" (V=151,936, d=4,096) configs, presented as the outermost tabset in the kernel benchmarks section.
 
 ### Quarto conventions
 

@@ -79,15 +79,17 @@ sharded vocab size (16K-64K) rather than the full 128K-256K.
 
 ## Benchmark Configurations
 
-The tables above show that popular open LLMs share similar vocab sizes (~128K-152K).
-The real variable is **hidden_size**, which scales with model size and directly determines the matmul cost.
-Vocab size (V=128,256) is held constant across benchmarks since it barely varies across model families.
+The tables above reveal two natural model families with distinct LM head shapes:
 
-The two benchmark configs differ only in hidden_size:
+- **Qwen family**: V~152K, d=4,096 (Qwen3-8B, Qwen3-235B MoE)
+- **Llama/DeepSeek family**: V~128K, d=8,192 (Llama 3 70B, DeepSeek V3)
 
-| Group | hidden_size | Representative Models |
-|-------|-------------|----------------------|
-| **Small (d=4,096)** | 4,096 | Llama 3 8B, Qwen3 8B, Qwen3-235B-A22B MoE |
-| **Large (d=8,192)** | 8,192 | Llama 3 70B, DeepSeek V3 |
+Each benchmark config uses the (V, d) pair that matches its representative models.
+The "small" vs "large" naming refers to the LM head memory footprint.
+
+| Group | V | d | LM Head (bf16) | Representative Models |
+| - | - | - | - | ---- |
+| **Small** | 151,936 | 4,096 | 1.19 GB | Qwen3-8B, Qwen3-235B MoE |
+| **Large** | 128,256 | 8,192 | 2.01 GB | Llama 3 70B, DeepSeek V3 |
 
 Gemma 3's 262K vocabulary is an outlier and could be used as a stress test for memory-bandwidth sensitivity.

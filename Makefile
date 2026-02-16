@@ -24,6 +24,10 @@ modal-plot-triton-bench:
 
 TRITON_BENCH_GPUS := b300 b200 h200 h100!
 
+modal-triton-benchmark-all-gpus:
+	$(foreach gpu,$(TRITON_BENCH_GPUS),\
+		$(MAKE) modal-triton-benchmark GPU=$(gpu) &&) true
+
 plot-all:
 	$(foreach gpu,$(TRITON_BENCH_GPUS),\
 		python benchmarking/plot-triton-bench.py --tgt_dir benchmarking/modal-results/triton-bench-$(gpu) &&) true
