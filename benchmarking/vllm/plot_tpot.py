@@ -23,6 +23,11 @@ VARIANT_COLORS: dict[str, str] = {
     "FMMS (Triton)": "#d62728",  # bold red
 }
 
+VARIANT_MARKERS: dict[str, str] = {
+    "Baseline (PyTorch compiled)": "s",  # square
+    "FMMS (Triton)": "o",  # circle
+}
+
 MODELS = [
     "Qwen3-1.7B",
     "Qwen3-8B",
@@ -115,12 +120,15 @@ def plot_tpot(df: pd.DataFrame, imgs_dir: Path):
     for ax, model in zip(axes, MODELS):
         mdf = df[df["model"] == model]
         palette = {v: VARIANT_COLORS[v] for v in mdf["variant"].unique()}
+        markers = {v: VARIANT_MARKERS[v] for v in mdf["variant"].unique()}
         sns.lineplot(
             mdf,
             x="max_concurrency",
             y="median_tpot_ms",
             hue="variant",
-            marker="o",
+            style="variant",
+            markers=markers,
+            dashes=False,
             ax=ax,
             palette=palette,
         )
@@ -172,7 +180,8 @@ def plot_speedup(results_dir: Path, imgs_dir: Path, max_concurrency: int):
                 vals = vdf.loc[vdf["max_concurrency"] == conc, "speedup_pct"].values
                 medians.append(np.median(vals))
 
-            ax.plot(concurrencies, medians, marker="o", zorder=3, label=variant, color=color)
+            marker = VARIANT_MARKERS.get(variant, "o")
+            ax.plot(concurrencies, medians, marker=marker, zorder=3, label=variant, color=color)
             ax.scatter(
                 vdf["max_concurrency"],
                 vdf["speedup_pct"],

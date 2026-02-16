@@ -59,11 +59,37 @@ PROVIDER_COLORS: dict[str, str] = {
     "flashinfer:sampling_from_logits": "#aec7e8",  # light blue
 }
 
+# Distinct markers so lines are distinguishable without color.
+PROVIDER_MARKERS: dict[str, str] = {
+    "FMMS (Triton)": "o",
+    "FMMS (Helion)": "D",
+    "FMMS (Triton NoNoise)": "^",
+    "PyTorch Compiled Sampling": "s",
+    "flashinfer:top_k_top_p_sampling_from_logits": "X",
+    "flashinfer:sampling_from_logits": "v",
+}
+
+# Hatch patterns for bar plots.
+PROVIDER_HATCHES: dict[str, str] = {
+    "FMMS (Triton)": "",
+    "FMMS (Helion)": "//",
+    "FMMS (Triton NoNoise)": "\\\\",
+    "PyTorch Compiled Sampling": "///",
+    "flashinfer:top_k_top_p_sampling_from_logits": "xxx",
+    "flashinfer:sampling_from_logits": "...",
+}
+
 
 def _provider_palette(providers: pd.Series | list[str]) -> dict[str, str]:
     """Return a color mapping for the providers present in the data."""
     unique = providers if isinstance(providers, list) else providers.unique()
     return {p: PROVIDER_COLORS[p] for p in unique}
+
+
+def _provider_markers(providers: pd.Series | list[str]) -> dict[str, str]:
+    """Return a marker mapping for the providers present in the data."""
+    unique = providers if isinstance(providers, list) else providers.unique()
+    return {p: PROVIDER_MARKERS[p] for p in unique}
 
 
 def read_gpu_name(folder: Path) -> str | None:
@@ -81,13 +107,16 @@ def read_gpu_name(folder: Path) -> str | None:
 def plot_batch_scaling(bdf_long: pd.DataFrame):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 3))
     palette = _provider_palette(bdf_long["provider"])
+    markers = _provider_markers(bdf_long["provider"])
 
     sns.lineplot(
         bdf_long,
         x="n_hidden_states",
         y="time[ms]",
         hue="provider",
-        marker="o",
+        style="provider",
+        markers=markers,
+        dashes=False,
         ax=ax1,
         palette=palette,
     )
@@ -120,7 +149,9 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
         x="n_hidden_states",
         y="samples/ms",
         hue="provider",
-        marker="o",
+        style="provider",
+        markers=markers,
+        dashes=False,
         ax=ax2,
         palette=palette,
     )
@@ -169,9 +200,15 @@ def plot_relative_performance(
         hue_order=show_providers,
         palette=palette,
     )
+    hatches = [PROVIDER_HATCHES.get(p, "") for p in show_providers]
+    for container, hatch in zip(ax.containers, hatches):
+        for bar in container:
+            bar.set_hatch(hatch)
     ax.grid(alpha=0.5, axis="y")
     ncol = 1  # min(len(show_providers), 2)
     sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.35), ncol=ncol)
+    for handle, hatch in zip(ax.get_legend().legend_handles, hatches):
+        handle.set_hatch(hatch)
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("Relative Performance")
     ax.set_xticks(ax.get_xticks(), labels=bdf_rel_long["n_hidden_states"].unique().astype(int))
@@ -203,6 +240,7 @@ def assign_col_mem_throughput(df: pd.DataFrame, vocab_size: int, hidden_size: in
 
 def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = None):
     palette = _provider_palette(bdf_long["provider"])
+    markers = _provider_markers(bdf_long["provider"])
 
     if peak_bw_gbs is not None:
         # Primary axis: Speed-of-Light %, so grid lines align with SoL ticks.
@@ -214,7 +252,9 @@ def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = N
             x="n_hidden_states",
             y="SoL %",
             hue="provider",
-            marker="o",
+            style="provider",
+            markers=markers,
+            dashes=False,
             palette=palette,
         )
 
@@ -249,7 +289,9 @@ def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = N
             x="n_hidden_states",
             y="mem_throughput[GB/s]",
             hue="provider",
-            marker="o",
+            style="provider",
+            markers=markers,
+            dashes=False,
             palette=palette,
         )
         ax.set_ylabel("Memory Throughput (GB/s)")
@@ -313,7 +355,7 @@ def plot_roofline(
         ax.plot(
             pdf["ai"],
             pdf["achieved_tflops"],
-            marker="o",
+            marker=PROVIDER_MARKERS.get(provider, "o"),
             label=provider,
             color=color,
             zorder=3,
