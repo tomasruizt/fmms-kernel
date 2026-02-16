@@ -103,6 +103,16 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax1.grid(alpha=0.5, which="both")
     ax1.set_xlabel("Batch Size")
     ax1.set_ylabel("Time (ms)")
+    ax1.annotate(
+        "lower is better",
+        xy=(0.98, 0.02),
+        xycoords="axes fraction",
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        color="gray",
+        style="italic",
+    )
     ax1.legend_.remove()
 
     sns.lineplot(
@@ -120,6 +130,16 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax2.grid(alpha=0.5)
     ax2.set_xlabel("Batch Size")
     ax2.set_ylabel("Samples/ms")
+    ax2.annotate(
+        "higher is better",
+        xy=(0.98, 0.02),
+        xycoords="axes fraction",
+        ha="right",
+        va="bottom",
+        fontsize=8,
+        color="gray",
+        style="italic",
+    )
     ax2.legend_.remove()
 
     handles, labels = ax1.get_legend_handles_labels()
@@ -146,6 +166,7 @@ def plot_relative_performance(
         x="n_hidden_states",
         y="relative-perf",
         hue="provider",
+        hue_order=show_providers,
         palette=palette,
     )
     ax.grid(alpha=0.5, axis="y")
