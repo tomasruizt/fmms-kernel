@@ -38,8 +38,8 @@ GPU_PEAK_BW_GBS: dict[str, float] = {
 
 # Peak BF16 dense tensor core TFLOP/s per GPU.
 GPU_PEAK_COMPUTE_TFLOPS: dict[str, float] = {
-    "NVIDIA H100 80GB HBM3": 989,
-    "NVIDIA H200": 989,
+    "NVIDIA H100 80GB HBM3": 989,  # 1979 with 2:4 sparsity
+    "NVIDIA H200": 989,  # 1979 with 2:4 sparsity
     "NVIDIA A100-SXM4-80GB": 312,
     # https://www.civo.com/blog/comparing-nvidia-b200-and-h100
     "NVIDIA B200": 2250,
