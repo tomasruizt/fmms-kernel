@@ -54,7 +54,7 @@ PROVIDER_COLORS: dict[str, str] = {
     "FMMS (Triton)": "#d62728",  # bold red
     "FMMS (Helion)": "#e45756",  # lighter red
     "FMMS (Triton NoNoise)": "#ff7f0e",  # orange
-    "Naive PyTorch Compiled": "#7f7f7f",  # gray
+    "PyTorch Compiled Sampling": "#7f7f7f",  # gray
     "flashinfer:top_k_top_p_sampling_from_logits": "#1f77b4",  # muted blue
     "flashinfer:sampling_from_logits": "#aec7e8",  # light blue
 }
@@ -392,7 +392,7 @@ def create_and_triton_bench_plots(folder: Path):
                 plt.close(ax.figure)
 
         FMMS = "FMMS (Triton)"  # noqa: N806
-        NAIVE = "Naive PyTorch Compiled"  # noqa: N806
+        NAIVE = "PyTorch Compiled Sampling"  # noqa: N806
         FI_SAMPLE = "flashinfer:sampling_from_logits"  # noqa: N806
         FI_TOPK = "flashinfer:top_k_top_p_sampling_from_logits"  # noqa: N806
 
