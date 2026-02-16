@@ -5,6 +5,8 @@ This package provides an efficient kernel for sampling from categorical distribu
 The key insight is that in LLM decode workloads, both the matmul and the sampling are memory-bound (the matmul collapses to a matrix-vector product).
 By fusing both operations, we avoid round-trips to GPU main memory (GMEM) and speed up the sampling process.
 
+![PyTorch Sampling vs FMMS](./imgs/baseline-vs-fmms-diagram.png)
+
 ## Features
 
 - **Bandwidth-Efficient**: Fuses matrix multiplication and sampling into a single Triton kernel, avoiding materialization of intermediate logit tensors, and preventing round-trips to GMEM.

@@ -28,6 +28,13 @@ modal-triton-benchmark-all-gpus:
 	$(foreach gpu,$(TRITON_BENCH_GPUS),\
 		$(MAKE) modal-triton-benchmark GPU=$(gpu) &&) true
 
+DIAGRAM_SRC := imgs/baseline-vs-fmms-diagram.drawio
+DIAGRAM_PNG := imgs/baseline-vs-fmms-diagram.png
+
+diagram:
+	xvfb-run drawio --export --format png --scale 2 --border 10 \
+		--output $(DIAGRAM_PNG) $(DIAGRAM_SRC)
+
 plot-all:
 	$(foreach gpu,$(TRITON_BENCH_GPUS),\
 		python benchmarking/plot-triton-bench.py --tgt_dir benchmarking/modal-results/triton-bench-$(gpu) &&) true
