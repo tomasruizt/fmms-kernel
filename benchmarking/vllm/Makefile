@@ -69,18 +69,29 @@ endef
 # nsys only records between /start_profile and /stop_profile, skipping model
 # load, warmup, and CUDA graph capture.
 NSYS := $(or $(shell which nsys 2>/dev/null),$(wildcard /opt/nvidia/nsight-systems/*/bin/nsys))
-GPU := H100
-NSYS_DIR := $(RESULTS_DIR)/profiles/nsight/$(GPU)/$(MODEL_SLUG)
+NSYS_GPU ?= $(shell nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 | sed 's/NVIDIA //;s/ /-/g')
+NSYS_MODEL := openai/gpt-oss-20b
+NSYS_MODEL_SLUG = $(lastword $(subst /, ,$(NSYS_MODEL)))
+NSYS_DIR = $(RESULTS_DIR)/profiles/nsight/$(NSYS_GPU)/$(NSYS_MODEL_SLUG)
 NSYS_MAX_TOKENS := 10
 NSYS_PROMPT := What is 2+2?
-NSYS_MODEL := openai/gpt-oss-20b
+NSYS_CONCURRENCY := 256
 
-# Usage: $(call run_nsys,<env_prefix>,<output_name>)
+# Usage: $(call run_nsys,<env_prefix>,<output_name>,<profiled_cmd>)
 # 1. Start vLLM under nsys with cudaProfilerApi capture.
 # 2. Wait for /health.
 # 3. Send a warmup request (fills CUDA graphs, JIT caches).
-# 4. /start_profile  →  single request (NSYS_MAX_TOKENS tokens)  →  /stop_profile.
+# 4. /start_profile  →  run profiled_cmd  →  /stop_profile.
 # 5. Kill the server. Profile saved to NSYS_DIR/<output_name>.nsys-rep.
+NSYS_SINGLE_REQUEST = curl -s http://localhost:8000/v1/chat/completions \
+	    -H "Content-Type: application/json" \
+	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}'
+NSYS_BENCH = $(VLLM) bench serve $(BENCH_FLAGS) \
+	    --hf-output-len $(NSYS_MAX_TOKENS) \
+	    --num-prompts $$(($(NSYS_CONCURRENCY) * 2)) \
+	    --max-concurrency $(NSYS_CONCURRENCY) \
+	    --request-rate 9999
+
 define run_nsys
 	mkdir -p "$(NSYS_DIR)"
 	$(1) VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
@@ -99,17 +110,10 @@ define run_nsys
 	    sleep 1; \
 	done; \
 	echo "Warmup request..."; \
-	curl -s http://localhost:8000/v1/chat/completions \
-	    -H "Content-Type: application/json" \
-	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}' \
-	    > /dev/null; \
+	$(NSYS_SINGLE_REQUEST) > /dev/null; \
 	echo "Starting profile..."; \
 	curl -s -X POST http://localhost:8000/start_profile; \
-	curl -s http://localhost:8000/v1/chat/completions \
-	    -H "Content-Type: application/json" \
-	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}' \
-	    | tee "$(NSYS_DIR)/$(2)-response.json"; \
-	echo; \
+	$(3) 2>&1 | tee "$(NSYS_DIR)/$(2)-bench.log"; \
 	curl -s -X POST http://localhost:8000/stop_profile; \
 	echo "Stopping server..."; \
 	sleep 2; \
@@ -125,16 +129,25 @@ define run_nsys
 endef
 
 nsys-baseline:
-	$(call run_nsys,env,baseline)
+	$(call run_nsys,env,baseline,$(NSYS_SINGLE_REQUEST))
 
 nsys-fmms-triton:
-	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton)
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton,$(NSYS_SINGLE_REQUEST))
 
 nsys-fmms-flashinfer:
-	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=flashinfer:top_k_top_p_sampling_from_logits,fmms-flashinfer)
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=flashinfer:top_k_top_p_sampling_from_logits,fmms-flashinfer,$(NSYS_SINGLE_REQUEST))
 
 nsys-all:
 	$(MAKE) nsys-baseline nsys-fmms-triton
+
+nsys-compare-qwen3-8b:
+	$(MAKE) NSYS_MODEL=Qwen/Qwen3-8B nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton
+
+nsys-compare-qwen3-8b-baseline:
+	$(call run_nsys,env,baseline-c$(NSYS_CONCURRENCY),$(NSYS_BENCH))
+
+nsys-compare-qwen3-8b-fmms-triton:
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton-c$(NSYS_CONCURRENCY),$(NSYS_BENCH))
 
 MODAL_GPU := b200
 MODAL_RESULTS_DIR := $(RESULTS_DIR)/../modal-results/vllm-bench-$(MODAL_GPU)
@@ -142,7 +155,7 @@ MODAL_RESULTS_DIR := $(RESULTS_DIR)/../modal-results/vllm-bench-$(MODAL_GPU)
 plot-modal:
 	$(PYTHON) "$(RESULTS_DIR)/plot_tpot.py" --results-dir "$(MODAL_RESULTS_DIR)"
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all engine-stats plot-modal
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all nsys-compare-qwen3-8b nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton engine-stats plot-modal
 
 $(MODEL_DIR):
 	mkdir -p "$@"
