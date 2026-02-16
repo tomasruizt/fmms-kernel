@@ -278,15 +278,21 @@ Binary location: `/opt/nvidia/nsight-systems/2025.5.2/bin/nsys` (also symlinked 
 
 ### vLLM + FMMS profiling (`benchmarking/vllm/Makefile`)
 
-Targets: `nsys-baseline`, `nsys-fmms-triton`, `nsys-fmms-flashinfer`, `nsys-all`. Usage:
+Single-model targets: `nsys-baseline`, `nsys-fmms-triton`, `nsys-fmms-flashinfer`, `nsys-all`.
+Comparison targets (baseline + fmms-triton at high concurrency): `nsys-compare-qwen3-8b`, `nsys-compare-qwen3-32b`.
+Individual sub-targets (e.g. `nsys-compare-qwen3-32b-baseline`) also work standalone.
 
 ```bash
-make -C benchmarking/vllm nsys-baseline MODEL=openai/gpt-oss-20b
+make -C benchmarking/vllm nsys-compare-qwen3-32b
 ```
 
-**Architecture**: Uses `--capture-range=cudaProfilerApi` with vLLM's `--profiler-config.profiler=cuda`. nsys sits idle during model load / CUDA graph capture / warmup, and only records between `/start_profile` and `/stop_profile` API calls. This produces a small, focused trace of just the inference steps.
+**Architecture**: Uses `vllm bench sweep serve` to manage the full server lifecycle (start, health check with 1200s timeout, bench, shutdown). The serve-cmd wraps `vllm serve` under `nsys profile --capture-range=cudaProfilerApi`, and `--profiler-config.profiler=cuda` makes vLLM call `cudaProfilerStart()`/`cudaProfilerStop()` via the `/start_profile` and `/stop_profile` endpoints. nsys only records between these calls, skipping model load, torch.compile, CUDA graph capture, and warmup.
 
-**Workflow**: start vLLM under nsys → wait for `/health` → warmup request → `/start_profile` → single request (10 tokens) → `/stop_profile` → kill server.
+**Bench params**: `nsys-bench-params.json` defines two iterations per server session:
+1. `{"_benchmark_name": "warmup"}` (empty config, no `--profile`, not recorded by nsys)
+2. `{"_benchmark_name": "profiled", "profile": true}` (adds `--profile`, recorded by nsys)
+
+The `--profile` flag on `vllm bench serve` automatically calls `/start_profile` before the benchmark and `/stop_profile` after. The warmup config is empty (not `"profile": false`) because `vllm bench serve` doesn't accept `--no-profile`.
 
 `VLLM_NVTX_SCOPES_FOR_PROFILING=1` enables NVTX range annotations in the model runner (`preprocess`, `forward`, `postprocess`, `sample`), making it easy to locate the FMMS kernel on the timeline.
 
@@ -295,9 +301,12 @@ Output: `benchmarking/vllm/profiles/nsight/<GPU>/<model_slug>/`.
 ### Key pitfalls
 
 - **gpt-oss-120b OOMs under nsys on H100.** The 120B model is tight on 81 GiB. nsys adds some memory overhead. At `--gpu-memory-utilization 0.90`, available KV cache was -0.63 GiB. Use a smaller model (e.g. `gpt-oss-20b`, which has 50+ GiB headroom) or reduce `gpu-memory-utilization` further for large models.
-- **Server shutdown requires killing both nsys and vllm.** `sudo kill $NSYS_PID` kills the nsys wrapper but vllm child processes may linger, holding GPU memory. The Makefile uses `sudo pkill -f "bin/vllm serve"` as a follow-up, plus a GPU memory polling loop (30s timeout) before proceeding.
-- **`sudo -E` is required** to pass environment variables (like `VLLM_USE_FMMS_SAMPLER`, `VLLM_NVTX_SCOPES_FOR_PROFILING`) through to the vllm process. Without `-E`, the FMMS sampler won't activate.
-- **`setsid`** is used to put nsys in its own session, so the kill signal doesn't propagate back to the make process.
+- **Do not use `sudo` with nsys in the serve-cmd.** `nsys profile --capture-range=cudaProfilerApi` works without root (only CPU profiling needs root). Using `sudo` creates a separate process tree that `vllm bench sweep serve` cannot kill, causing the server to linger and OOM the next run. Environment variables (like `VLLM_USE_FMMS_SAMPLER`) are passed via the `env` prefix in the serve-cmd without needing sudo.
+- **`pkill -f` can kill the make process.** Never use `pkill -f "bin/vllm serve"` in a Makefile recipe. The recipe shell's cmdline (passed to `/bin/sh -c '...'`) contains the full recipe text, which matches the pattern. This kills the recipe shell and terminates make. Use `vllm bench sweep serve` instead, which manages server lifecycle internally.
+- **`BENCH_FLAGS` vs `BENCH_DATASET_FLAGS`**: `BENCH_FLAGS` includes `--hf-output-len 256` for regular benchmarks. The nsys recipe uses `BENCH_DATASET_FLAGS` (without `--hf-output-len`) so that `NSYS_*_FLAGS` can set `--hf-output-len 10` without duplication. vLLM warns on duplicate keys but uses the last value.
+- **`vllm bench sweep serve` handles readiness.** Use `--server-ready-timeout 1200` (20 min) to accommodate large models with torch.compile cold starts. Never hand-roll health check loops.
+- **nsys `--capture-range-end=stop` orphans vllm.** nsys exits after the capture range ends to generate the `.nsys-rep` report, but vllm keeps running. The sweep's `stop()` checks `server_process.poll()`, sees nsys already exited, and skips `killpg`. Fix: after the sweep, kill any process still on port 8000 with `kill $(lsof -ti :8000)`.
+- **`--after-bench-cmd` is required.** The serve-cmd starts with `env ...` so the sweep can't auto-detect the server type for cache resets. Pass `--after-bench-cmd` explicitly.
 
 ## Modal profiles
 

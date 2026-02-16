@@ -1,5 +1,8 @@
 RESULTS_DIR := $(CURDIR)
-VLLM := $(shell which vllm)
+VLLM := $(shell which vllm 2>/dev/null)
+ifeq ($(VLLM),)
+$(error vllm not found. Activate your venv first)
+endif
 PYTHON := $(shell which python)
 BENCH_PARAMS := $(RESULTS_DIR)/bench-params.json
 
@@ -9,7 +12,8 @@ MAX_MODEL_LEN := 1024
 MODEL_DIR := $(RESULTS_DIR)/$(MODEL_SLUG)
 
 SERVE_FLAGS := --max-model-len $(MAX_MODEL_LEN) --no-enable-prefix-caching --uvicorn-log-level warning
-BENCH_FLAGS := --dataset-name hf --dataset-path AI-MO/aimo-validation-aime --hf-output-len 256 --temperature 0.6 --top-k -1 --top-p 1.0 --backend openai-chat --endpoint /v1/chat/completions
+BENCH_DATASET_FLAGS := --dataset-name hf --dataset-path AI-MO/aimo-validation-aime --temperature 0.6 --top-k -1 --top-p 1.0 --backend openai-chat --endpoint /v1/chat/completions
+BENCH_FLAGS := $(BENCH_DATASET_FLAGS) --hf-output-len 256
 
 AFTER_BENCH := curl -s -X POST http://localhost:8000/reset_prefix_cache && curl -s -X POST http://localhost:8000/reset_mm_cache && curl -s -X POST http://localhost:8000/reset_encoder_cache
 
@@ -66,88 +70,77 @@ endef
 
 # --- nsys profiling ---
 # Profiles vLLM decode steps under nsys. Uses cudaProfilerApi capture range so
-# nsys only records between /start_profile and /stop_profile, skipping model
-# load, warmup, and CUDA graph capture.
+# nsys only records between start/stop profile calls, skipping model load,
+# warmup, and CUDA graph capture. `vllm bench serve --profile` triggers
+# the start/stop calls automatically.
 NSYS := $(or $(shell which nsys 2>/dev/null),$(wildcard /opt/nvidia/nsight-systems/*/bin/nsys))
 NSYS_GPU ?= $(shell nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 | sed 's/NVIDIA //;s/ /-/g')
 NSYS_MODEL := openai/gpt-oss-20b
 NSYS_MODEL_SLUG = $(lastword $(subst /, ,$(NSYS_MODEL)))
 NSYS_DIR = $(RESULTS_DIR)/profiles/nsight/$(NSYS_GPU)/$(NSYS_MODEL_SLUG)
 NSYS_MAX_TOKENS := 10
-NSYS_PROMPT := What is 2+2?
 NSYS_CONCURRENCY := 256
 
-# Usage: $(call run_nsys,<env_prefix>,<output_name>,<profiled_cmd>)
-# 1. Start vLLM under nsys with cudaProfilerApi capture.
-# 2. Wait for /health.
-# 3. Send a warmup request (fills CUDA graphs, JIT caches).
-# 4. /start_profile  →  run profiled_cmd  →  /stop_profile.
-# 5. Kill the server. Profile saved to NSYS_DIR/<output_name>.nsys-rep.
-NSYS_SINGLE_REQUEST = curl -s http://localhost:8000/v1/chat/completions \
-	    -H "Content-Type: application/json" \
-	    -d '{"model":"$(NSYS_MODEL)","messages":[{"role":"user","content":"$(NSYS_PROMPT)"}],"max_tokens":$(NSYS_MAX_TOKENS),"temperature":0.6,"top_p":1.0,"top_k":-1}'
-NSYS_BENCH = $(VLLM) bench serve $(BENCH_FLAGS) \
-	    --hf-output-len $(NSYS_MAX_TOKENS) \
-	    --num-prompts $$(($(NSYS_CONCURRENCY) * 2)) \
-	    --max-concurrency $(NSYS_CONCURRENCY) \
-	    --request-rate 9999
-
+# Usage: $(call run_nsys,<env_prefix>,<output_name>,<bench_flags>)
+# Uses `vllm bench sweep serve` to manage the server lifecycle (start, health
+# check, bench, shutdown). The serve-cmd wraps vllm under nsys with
+# cudaProfilerApi capture. The bench-cmd runs twice: warmup (no --profile,
+# not recorded by nsys) then profiled (--profile, recorded by nsys).
 define run_nsys
+	@if [ -z "$(NSYS)" ]; then echo "ERROR: nsys not found. Install with: sudo apt-get install -y nsight-systems-2025.5.2"; exit 1; fi
 	mkdir -p "$(NSYS_DIR)"
-	$(1) VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
-	    sudo -E setsid $(NSYS) profile \
-	        --capture-range=cudaProfilerApi --capture-range-end=stop \
-	        --force-overwrite true \
-	        -o "$(NSYS_DIR)/$(2)" \
-	        $(VLLM) serve $(NSYS_MODEL) $(SERVE_FLAGS) \
-	            --gpu-memory-utilization 0.90 \
-	            --profiler-config.profiler=cuda \
-	        > "$(NSYS_DIR)/$(2)-server.log" 2>&1 & \
-	NSYS_PID=$$!; \
-	echo "Waiting for vLLM under nsys (PID $$NSYS_PID)..."; \
-	for i in $$(seq 1 180); do \
-	    curl -sf http://localhost:8000/health > /dev/null 2>&1 && break; \
-	    sleep 1; \
-	done; \
-	echo "Warmup request..."; \
-	$(NSYS_SINGLE_REQUEST) > /dev/null; \
-	echo "Starting profile..."; \
-	curl -s -X POST http://localhost:8000/start_profile; \
-	$(3) 2>&1 | tee "$(NSYS_DIR)/$(2)-bench.log"; \
-	curl -s -X POST http://localhost:8000/stop_profile; \
-	echo "Stopping server..."; \
-	sleep 2; \
-	sudo kill $$NSYS_PID 2>/dev/null; sudo pkill -f "bin/vllm serve" 2>/dev/null; wait $$NSYS_PID 2>/dev/null; \
-	echo "Waiting for GPU memory to free..."; \
-	for i in $$(seq 1 30); do \
-	    FREE=$$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1); \
-	    TOTAL=$$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1); \
-	    [ "$$FREE" -gt "$$((TOTAL - 1000))" ] 2>/dev/null && break; \
-	    sleep 1; \
-	done; \
-	echo "Profile saved to $(NSYS_DIR)/$(2).nsys-rep"
+	$(VLLM) bench sweep serve \
+	    --serve-cmd "$(1) VLLM_NVTX_SCOPES_FOR_PROFILING=1 $(NSYS) profile --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite true -o $(NSYS_DIR)/$(2) $(VLLM) serve $(NSYS_MODEL) $(SERVE_FLAGS) --gpu-memory-utilization 0.90 --profiler-config.profiler=cuda" \
+	    --bench-cmd "$(VLLM) bench serve $(BENCH_DATASET_FLAGS) $(3)" \
+	    --bench-params "$(RESULTS_DIR)/nsys-bench-params.json" \
+	    --after-bench-cmd "$(AFTER_BENCH)" \
+	    --server-ready-timeout 1200 \
+	    --num-runs 1 \
+	    --show-stdout \
+	    -o "$(NSYS_DIR)/$(2)" \
+	    2>&1 | tee "$(NSYS_DIR)/$(2)-bench.log"
+	@# nsys exits after capture (--capture-range-end=stop) but vllm may linger.
+	@-kill $$(lsof -ti :8000) 2>/dev/null; sleep 5
+	@echo "Profile saved to $(NSYS_DIR)/$(2).nsys-rep"
 endef
 
+NSYS_SINGLE_FLAGS = --hf-output-len $(NSYS_MAX_TOKENS) --num-prompts 1 --max-concurrency 1
+NSYS_CONCURRENCY_FLAGS = --hf-output-len $(NSYS_MAX_TOKENS) \
+	    --num-prompts $$(($(NSYS_CONCURRENCY) * 2)) \
+	    --max-concurrency $(NSYS_CONCURRENCY)
+
 nsys-baseline:
-	$(call run_nsys,env,baseline,$(NSYS_SINGLE_REQUEST))
+	$(call run_nsys,env,baseline,$(NSYS_SINGLE_FLAGS))
 
 nsys-fmms-triton:
-	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton,$(NSYS_SINGLE_REQUEST))
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton,$(NSYS_SINGLE_FLAGS))
 
 nsys-fmms-flashinfer:
-	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=flashinfer:top_k_top_p_sampling_from_logits,fmms-flashinfer,$(NSYS_SINGLE_REQUEST))
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=flashinfer:top_k_top_p_sampling_from_logits,fmms-flashinfer,$(NSYS_SINGLE_FLAGS))
 
 nsys-all:
 	$(MAKE) nsys-baseline nsys-fmms-triton
+
+nsys-compare-qwen3-8b nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton: NSYS_MODEL := Qwen/Qwen3-8B
+nsys-compare-qwen3-32b nsys-compare-qwen3-32b-baseline nsys-compare-qwen3-32b-fmms-triton: NSYS_MODEL := Qwen/Qwen3-32B
 
 nsys-compare-qwen3-8b:
 	$(MAKE) NSYS_MODEL=Qwen/Qwen3-8B nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton
 
 nsys-compare-qwen3-8b-baseline:
-	$(call run_nsys,env,baseline-c$(NSYS_CONCURRENCY),$(NSYS_BENCH))
+	$(call run_nsys,env,baseline-c$(NSYS_CONCURRENCY),$(NSYS_CONCURRENCY_FLAGS))
 
 nsys-compare-qwen3-8b-fmms-triton:
-	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton-c$(NSYS_CONCURRENCY),$(NSYS_BENCH))
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton-c$(NSYS_CONCURRENCY),$(NSYS_CONCURRENCY_FLAGS))
+
+nsys-compare-qwen3-32b:
+	$(MAKE) NSYS_MODEL=Qwen/Qwen3-32B nsys-compare-qwen3-32b-baseline nsys-compare-qwen3-32b-fmms-triton
+
+nsys-compare-qwen3-32b-baseline:
+	$(call run_nsys,env,baseline-c$(NSYS_CONCURRENCY),$(NSYS_CONCURRENCY_FLAGS))
+
+nsys-compare-qwen3-32b-fmms-triton:
+	$(call run_nsys,env VLLM_USE_FMMS_SAMPLER=1 VLLM_FMMS_PROVIDER=fused-triton,fmms-triton-c$(NSYS_CONCURRENCY),$(NSYS_CONCURRENCY_FLAGS))
 
 MODAL_GPU := b200
 MODAL_RESULTS_DIR := $(RESULTS_DIR)/../modal-results/vllm-bench-$(MODAL_GPU)
@@ -155,7 +148,7 @@ MODAL_RESULTS_DIR := $(RESULTS_DIR)/../modal-results/vllm-bench-$(MODAL_GPU)
 plot-modal:
 	$(PYTHON) "$(RESULTS_DIR)/plot_tpot.py" --results-dir "$(MODAL_RESULTS_DIR)"
 
-.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all nsys-compare-qwen3-8b nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton engine-stats plot-modal
+.PHONY: all quick baseline fmms-triton fmms-flashinfer quick-baseline quick-fmms-triton quick-fmms-flashinfer eval-baseline eval-baseline-fmms-params eval-fmms-triton judge nsys-baseline nsys-fmms-triton nsys-fmms-flashinfer nsys-all nsys-compare-qwen3-8b nsys-compare-qwen3-8b-baseline nsys-compare-qwen3-8b-fmms-triton nsys-compare-qwen3-32b nsys-compare-qwen3-32b-baseline nsys-compare-qwen3-32b-fmms-triton engine-stats plot-modal
 
 $(MODEL_DIR):
 	mkdir -p "$@"
