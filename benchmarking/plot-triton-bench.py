@@ -182,45 +182,63 @@ def assign_col_mem_throughput(df: pd.DataFrame, vocab_size: int, hidden_size: in
 
 def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = None):
     palette = _provider_palette(bdf_long["provider"])
-    ax = sns.lineplot(
-        bdf_long,
-        x="n_hidden_states",
-        y="mem_throughput[GB/s]",
-        hue="provider",
-        marker="o",
-        palette=palette,
-    )
 
     if peak_bw_gbs is not None:
-        ax.axhline(peak_bw_gbs, color="gray", linestyle="--", linewidth=1)
+        # Primary axis: Speed-of-Light %, so grid lines align with SoL ticks.
+        plot_df = bdf_long.copy()
+        plot_df["SoL %"] = plot_df["mem_throughput[GB/s]"] / peak_bw_gbs * 100
+
+        ax = sns.lineplot(
+            plot_df,
+            x="n_hidden_states",
+            y="SoL %",
+            hue="provider",
+            marker="o",
+            palette=palette,
+        )
+
+        ax.axhline(100, color="black", linestyle="--", linewidth=1)
         ax.text(
             0.01,
-            peak_bw_gbs,
+            100,
             "Peak Memory Bandwidth",
             transform=ax.get_yaxis_transform(),
             va="bottom",
             ha="left",
-            fontsize=8,
-            color="gray",
+            fontsize=9,
+            color="black",
         )
+
+        ax.set_ylabel("Speed-of-Light %")
+        ax.set_ylim(bottom=0, top=110)
+        ax.yaxis.set_minor_locator(plt.FixedLocator([10, 30, 50, 70, 90]))
+
+        # Secondary axis: GB/s on the right
+        ax2 = ax.secondary_yaxis(
+            "right",
+            functions=(
+                lambda pct: pct / 100 * peak_bw_gbs,
+                lambda gbs: gbs / peak_bw_gbs * 100,
+            ),
+        )
+        ax2.set_ylabel("Memory Throughput (GB/s)")
+    else:
+        ax = sns.lineplot(
+            bdf_long,
+            x="n_hidden_states",
+            y="mem_throughput[GB/s]",
+            hue="provider",
+            marker="o",
+            palette=palette,
+        )
+        ax.set_ylabel("Memory Throughput (GB/s)")
 
     ax.set_xscale("log")
     unique_n_hidden = sorted(bdf_long["n_hidden_states"].unique())
     ax.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
-    ax.minorticks_off()
-    ax.grid(alpha=0.5)
+    ax.xaxis.set_minor_locator(plt.NullLocator())
+    ax.grid(alpha=0.5, which="both")
     ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Memory Throughput (GB/s)")
-
-    if peak_bw_gbs is not None:
-        ax2 = ax.secondary_yaxis(
-            "right",
-            functions=(
-                lambda gbs: gbs / peak_bw_gbs * 100,
-                lambda pct: pct / 100 * peak_bw_gbs,
-            ),
-        )
-        ax2.set_ylabel("Speed-of-Light %")
 
     sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.35), ncol=2)
 
