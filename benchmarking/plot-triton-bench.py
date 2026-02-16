@@ -101,7 +101,7 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax1.yaxis.set_major_formatter(yfmt)
     ax1.yaxis.set_minor_formatter(yfmt)
     ax1.grid(alpha=0.5, which="both")
-    ax1.set_xlabel("Inference batch size")
+    ax1.set_xlabel("Batch Size")
     ax1.set_ylabel("Time (ms)")
     ax1.legend_.remove()
 
@@ -118,7 +118,7 @@ def plot_batch_scaling(bdf_long: pd.DataFrame):
     ax2.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
     ax2.xaxis.set_minor_locator(plt.NullLocator())
     ax2.grid(alpha=0.5)
-    ax2.set_xlabel("Inference batch size")
+    ax2.set_xlabel("Batch Size")
     ax2.set_ylabel("Samples/ms")
     ax2.legend_.remove()
 
@@ -151,7 +151,7 @@ def plot_relative_performance(
     ax.grid(alpha=0.5, axis="y")
     ncol = 1  # min(len(show_providers), 2)
     sns.move_legend(ax, "upper center", title="Method", bbox_to_anchor=(0.5, 1.35), ncol=ncol)
-    ax.set_xlabel("Inference batch size")
+    ax.set_xlabel("Batch Size")
     ax.set_ylabel("Relative Performance")
     ax.set_xticks(ax.get_xticks(), labels=bdf_rel_long["n_hidden_states"].unique().astype(int))
     ax.figure.tight_layout()
@@ -209,7 +209,7 @@ def plot_memory_throughput(bdf_long: pd.DataFrame, peak_bw_gbs: float | None = N
     ax.set_xticks(unique_n_hidden, labels=[int(x) for x in unique_n_hidden])
     ax.minorticks_off()
     ax.grid(alpha=0.5)
-    ax.set_xlabel("Inference batch size")
+    ax.set_xlabel("Batch Size")
     ax.set_ylabel("Memory Throughput (GB/s)")
 
     if peak_bw_gbs is not None:
