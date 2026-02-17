@@ -76,6 +76,9 @@ modal-vllm-benchmark-full-qwen3-1.7b:
 modal-vllm-benchmark-full-qwen3-8b:
 	$(MAKE) modal-vllm-benchmark VLLM_SWEEP=all VLLM_MODEL=Qwen/Qwen3-8B
 
+modal-vllm-benchmark-full-qwen3-32b:
+	$(MAKE) modal-vllm-benchmark VLLM_SWEEP=all VLLM_MODEL=Qwen/Qwen3-32B
+
 modal-vllm-benchmark: modal-create-results-vllm-bench modal-get-results-vllm-bench modal-collect-results-vllm-bench
 
 modal-create-results-vllm-bench:
@@ -95,5 +98,7 @@ modal-get-results-vllm-bench:
 	rm -rf "$$tmpdir"
 
 modal-collect-results-vllm-bench:
-	python benchmarking/vllm/collect_results.py $(VLLM_BENCH_DIR)/$(VLLM_MODEL_SLUG) \
-		| tee $(VLLM_BENCH_DIR)/$(VLLM_MODEL_SLUG)/results.txt
+	@model_dir=$$(ls -d $(VLLM_BENCH_DIR)/$(VLLM_MODEL_SLUG)-trial* 2>/dev/null | sort -V | tail -1); \
+	if [ -z "$$model_dir" ]; then model_dir=$(VLLM_BENCH_DIR)/$(VLLM_MODEL_SLUG); fi; \
+	echo "Collecting results from $$model_dir"; \
+	python benchmarking/vllm/collect_results.py "$$model_dir" | tee "$$model_dir/results.txt"

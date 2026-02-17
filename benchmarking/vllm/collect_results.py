@@ -9,10 +9,8 @@ The second form prints per-run TPOT for a single variant.
 """
 
 import sys
-from itertools import product
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from tabulate import tabulate
 
@@ -36,12 +34,6 @@ def read_summary(results_dir: Path, variant_key: str) -> tuple[pd.DataFrame, str
     run_dir = latest_run(variant_dir)
     df = pd.read_csv(run_dir / "summary.csv")
     return df, run_dir.name
-
-
-def hodges_lehmann_pct(baseline_vals, fmms_vals):
-    """Hodges-Lehmann estimator: median of all pairwise speedup percentages."""
-    pairs = [(f - b) / b * 100 for b, f in product(baseline_vals, fmms_vals)]
-    return np.median(pairs)
 
 
 def print_summary(results_dir: Path):
@@ -84,19 +76,19 @@ def print_summary(results_dir: Path):
         if display_name not in tpot.columns:
             continue
         result[display_name] = tpot[display_name]
-        # Hodges-Lehmann: median of all pairwise speedup percentages
+        # Paired speedup: match run_number 1:1 between baseline and FMMS
         baseline_df = raw_frames["baseline"]
         fmms_df = raw_frames[variant_key]
-        concurrencies = sorted(baseline_df["max_concurrency"].unique())
-        hl_speedups = {}
-        for conc in concurrencies:
-            b_vals = baseline_df.loc[
-                baseline_df["max_concurrency"] == conc, "median_tpot_ms"
-            ].values
-            f_vals = fmms_df.loc[fmms_df["max_concurrency"] == conc, "median_tpot_ms"].values
-            hl_speedups[conc] = hodges_lehmann_pct(b_vals, f_vals)
-        hl_series = pd.Series(hl_speedups, name=f"{display_name} Speedup")
-        result[f"{display_name} Speedup"] = hl_series.map(lambda x: f"{x:+.1f}%")
+        merged = baseline_df[["max_concurrency", "run_number", "median_tpot_ms"]].merge(
+            fmms_df[["max_concurrency", "run_number", "median_tpot_ms"]],
+            on=["max_concurrency", "run_number"],
+            suffixes=("_base", "_fmms"),
+        )
+        merged["speedup_pct"] = (
+            merged["median_tpot_ms_fmms"] / merged["median_tpot_ms_base"] - 1
+        ) * 100
+        median_speedup = merged.groupby("max_concurrency")["speedup_pct"].median()
+        result[f"{display_name} Speedup"] = median_speedup.map(lambda x: f"{x:+.1f}%")
     result.index.name = "Concurrency"
 
     print(tabulate(result, headers="keys", tablefmt="grid", floatfmt=".2f"))
