@@ -38,6 +38,9 @@ diagram:
 plot-all:
 	$(foreach gpu,$(TRITON_BENCH_GPUS),\
 		python benchmarking/plot-triton-bench.py --tgt_dir benchmarking/modal-results/triton-bench-$(gpu) &&) true
+	$(MAKE) plot-vllm-bench
+
+plot-vllm-bench:
 	python benchmarking/vllm/plot_tpot.py --results-dir $(VLLM_BENCH_DIR)
 
 modal-example:
