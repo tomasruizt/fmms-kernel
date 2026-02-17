@@ -1,3 +1,4 @@
+*.nsys-rep
 benchmarking/profiles/
 benchmarking/modal-results/
 benchmarking/modal-results*

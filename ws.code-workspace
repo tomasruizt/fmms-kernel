@@ -4,9 +4,6 @@
 			"path": "."
 		},
 		{
-			"path": "../vllm"
-		},
-		{
 			"path": "../tomasruizt.github.io"
 		}
 	],
