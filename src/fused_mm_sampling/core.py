@@ -601,6 +601,10 @@ def get_sampler(provider: str, weights: torch.Tensor) -> Sampler:
             from .cuda_impl import fused_mm_sample_cuda
 
             return SimpleSampler(lambda **kwargs: fused_mm_sample_cuda(**kwargs, seed=0))
+        case "fused-cutlass":
+            from .cutlass_impl import fused_mm_sample_cutlass
+
+            return SimpleSampler(lambda **kwargs: fused_mm_sample_cutlass(**kwargs, seed=0))
         case "helion":
             from .helion_impl import fused_mm_sample_helion
 
