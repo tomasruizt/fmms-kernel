@@ -89,14 +89,9 @@ Build the custom `VisitorRowArgmax` visitor. Split into sub-steps:
 
 **5c: Add Gumbel noise with Philox RNG.** Derive global `(v, h)` coordinates from the epilogue's coordinate tensors to seed the RNG deterministically. Use the existing chi-squared distribution tests to prove sampling correctness.
 
-### Step 6: Profile with NCU
+### Step 6: Integrate EVT epilogue into the `fused-cutlass` provider
 
-Run Nsight Compute on the fused kernel. Key metrics:
-- Memory throughput (should be near roofline, decode matmul is memory-bound)
-- Verify zero intermediate `[V, H]` buffer writes
-- Compare against the Triton kernel (1.42ms baseline)
-
-Iterate on the kernel based on NCU feedback.
+Replace the 2-kernel path in `fmms_cutlass_stage1` (GEMM → full logits → `gumbel_argmax_kernel`) with the single-kernel EVT approach. The EVT epilogue (from steps 5a-c) performs temperature scaling, Gumbel noise, and per-tile argmax inside the GEMM epilogue, eliminating the intermediate `[V, H]` logits buffer. The Python wrapper reduces across V-tiles (same as `test_row_argmax` today). After this step, `gumbel_argmax_kernel` and `tile_argmax_kernel` can be deleted.
 
 ### Known issues to fix early
 
