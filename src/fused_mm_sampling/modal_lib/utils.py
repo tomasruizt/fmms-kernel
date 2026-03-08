@@ -1,3 +1,6 @@
+import os
+import shutil
+
 import modal
 
 
@@ -35,6 +38,13 @@ def enable_cuda_jit_cache():
     (e.g. CUTLASS kernels via torch.utils.cpp_extension.load()). Subsequent
     runs with unchanged source skip the expensive nvcc compilation.
     """
-    import os
+    os.environ["TORCH_EXTENSIONS_DIR"] = cuda_jit_cache_dir
 
-    os.environ["TORCH_EXTENSIONS_DIR"] = f"{volume_path}/cache/torch_extensions"
+
+cuda_jit_cache_dir = f"{volume_path}/cache/torch_extensions"
+
+
+def clear_cuda_jit_cache():
+    """Delete the JIT-compiled CUDA extensions cache on the Modal volume."""
+    shutil.rmtree(cuda_jit_cache_dir, ignore_errors=True)
+    print(f"Cleared JIT cache at {cuda_jit_cache_dir}")

@@ -27,6 +27,8 @@
 // EVT (Epilogue Visitor Tree) includes
 #include "cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp"
 #include "cutlass/epilogue/thread/activation.h"  // Identity<T>
+// Custom per-tile argmax visitor
+#include "sm90_row_argmax.hpp"
 
 using namespace cute;
 
@@ -227,6 +229,117 @@ using Gemm_RowReduce = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Ro
 
 using StrideC_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideC;
 using StrideD_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideD;
+
+
+// ──────────────────── EVT GEMM: per-tile argmax across V ────────────────────
+//
+// Per-tile row argmax: each CTA tile reduces its local M rows, tracking
+// (value, index) pairs. Results are written to a gmem workspace buffer.
+// Cross-tile reduction is done by the host (Python) after the GEMM.
+//
+// EVT tree:
+//   Sm90RowArgmax  →  writes per-tile (val, idx) to workspace
+//     └── Sm90AccFetch  →  provides accumulator values
+
+using RowArgmaxEVT = cutlass::epilogue::fusion::Sm90EVT<
+    cutlass::epilogue::fusion::Sm90RowArgmax<
+        0,                      // stages (must be 0)
+        TileShape_EVT,
+        int32_t,                // output element type (argmax index)
+        RoundStyle,
+        Stride<_0, _1, _0>,    // StrideMNL: M=0 (reduced), N=1, L=0
+        4                       // alignment: 4 int32s = 16 bytes
+    >,
+    cutlass::epilogue::fusion::Sm90AccFetch
+>;
+
+using CollectiveEpilogue_Argmax = typename cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    TileShape_EVT, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementCompute,
+    ElementC, LayoutC, AlignmentC_EVT,
+    ElementD, LayoutD, AlignmentD_EVT,
+    cutlass::epilogue::TmaWarpSpecialized,
+    RowArgmaxEVT
+>::CollectiveOp;
+
+using CollectiveMainloop_Argmax = typename cutlass::gemm::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape_EVT, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<
+        static_cast<int>(sizeof(typename CollectiveEpilogue_Argmax::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto
+>::CollectiveOp;
+
+using GemmKernel_Argmax = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int, int, int>,
+    CollectiveMainloop_Argmax,
+    CollectiveEpilogue_Argmax
+>;
+
+using Gemm_Argmax = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Argmax>;
+
+using StrideC_Argmax = typename Gemm_Argmax::GemmKernel::StrideC;
+using StrideD_Argmax = typename Gemm_Argmax::GemmKernel::StrideD;
+
+
+// ──────────────────── Per-tile argmax kernel (no noise) ────────────────────
+
+// Simple argmax across TILE_V rows for each H column.
+// Grid: (n_tiles_v, H)   Block: (SAMPLING_THREADS,)
+
+__global__ void tile_argmax_kernel(
+    const float* __restrict__ logits,           // [V, H], row-major
+    float*       __restrict__ tile_max_vals,     // [n_tiles_v, H]
+    int32_t*     __restrict__ tile_max_idxs,     // [n_tiles_v, H]
+    int V,
+    int H
+) {
+    const int tile_id = blockIdx.x;
+    const int h_idx = blockIdx.y;
+    if (h_idx >= H) return;
+
+    const int v_offset = tile_id * TILE_V;
+    const int tile_v_size = min(TILE_V, V - v_offset);
+    const int tid = threadIdx.x;
+
+    float best_val = -INFINITY;
+    int best_idx = -1;
+
+    for (int v = tid; v < tile_v_size; v += SAMPLING_THREADS) {
+        float val = logits[(v_offset + v) * H + h_idx];
+        if (val > best_val) {
+            best_val = val;
+            best_idx = v_offset + v;
+        }
+    }
+
+    // Block-level reduction via shared memory
+    __shared__ float smem_vals[SAMPLING_THREADS];
+    __shared__ int smem_idxs[SAMPLING_THREADS];
+    smem_vals[tid] = best_val;
+    smem_idxs[tid] = best_idx;
+    __syncthreads();
+
+    for (int stride = SAMPLING_THREADS / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (smem_vals[tid + stride] > smem_vals[tid]) {
+                smem_vals[tid] = smem_vals[tid + stride];
+                smem_idxs[tid] = smem_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        tile_max_vals[tile_id * H + h_idx] = smem_vals[0];
+        tile_max_idxs[tile_id * H + h_idx] = smem_idxs[0];
+    }
+}
 
 
 // ──────────────────── Gumbel noise + tiled argmax kernel ────────────────────
@@ -627,6 +740,124 @@ std::vector<torch::Tensor> test_evt_row_reduce(
 }
 
 
+// ──────────────────────── 2-stage row argmax: EVT per-tile argmax + Python reduction ────────
+//
+// Stage 1: CUTLASS GEMM with EVT epilogue that reduces each CTA tile's M rows
+//          to a single (max_val, argmax_idx) per N column. No intermediate [V, H]
+//          logits buffer — the reduction happens as tiles are computed.
+//          Per-tile results are written to a gmem workspace buffer.
+// Stage 2: Host unpacks workspace → [n_tiles_v, H] val/idx tensors.
+//          Python reduces across tiles.
+
+std::vector<torch::Tensor> test_row_argmax(
+    torch::Tensor weights,        // [V, D] bfloat16
+    torch::Tensor hidden_states   // [H, D] bfloat16
+) {
+    TORCH_CHECK(weights.is_cuda(), "weights must be CUDA");
+    TORCH_CHECK(hidden_states.is_cuda(), "hidden_states must be CUDA");
+    TORCH_CHECK(weights.dtype() == torch::kBFloat16, "weights must be bfloat16");
+    TORCH_CHECK(hidden_states.dtype() == torch::kBFloat16, "hidden_states must be bfloat16");
+    TORCH_CHECK(weights.is_contiguous(), "weights must be contiguous");
+    TORCH_CHECK(hidden_states.is_contiguous(), "hidden_states must be contiguous");
+
+    int V = weights.size(0);
+    int D = weights.size(1);
+    int H = hidden_states.size(0);
+    TORCH_CHECK(hidden_states.size(1) == D,
+        "hidden_states dim 1 (", hidden_states.size(1), ") != weights dim 1 (", D, ")");
+
+    // EVT requires H padded to multiple of AlignmentD_EVT (4 for float32)
+    int H_padded = ((H + AlignmentD_EVT - 1) / AlignmentD_EVT) * AlignmentD_EVT;
+    bool needs_padding = (H_padded != H);
+
+    torch::Tensor hs_padded = hidden_states;
+    if (needs_padding) {
+        hs_padded = torch::zeros({H_padded, D}, hidden_states.options());
+        hs_padded.narrow(0, 0, H).copy_(hidden_states);
+    }
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    // D output (required by collective builder but we don't need the full logits)
+    auto logits_dummy = torch::empty({V, H_padded}, torch::dtype(torch::kFloat32).device(weights.device()));
+
+    // Dummy argmax output for the visitor's ptr_row (not used for per-tile mode)
+    auto argmax_dummy = torch::empty({H_padded}, torch::dtype(torch::kInt32).device(weights.device()));
+
+    StrideA stride_A{int64_t(D), {}, int64_t(0)};
+    StrideA stride_B{int64_t(D), {}, int64_t(0)};
+    StrideC_Argmax stride_C{int64_t(H_padded), {}, int64_t(0)};
+    StrideD_Argmax stride_D{int64_t(H_padded), {}, int64_t(0)};
+
+    int device_id = weights.get_device();
+    cutlass::KernelHardwareInfo hw_info;
+    hw_info.device_id = device_id;
+    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id);
+
+    typename Gemm_Argmax::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {V, H_padded, D},
+        {
+            reinterpret_cast<ElementA const*>(weights.data_ptr<at::BFloat16>()),
+            stride_A,
+            reinterpret_cast<ElementB const*>(hs_padded.data_ptr<at::BFloat16>()),
+            stride_B
+        },
+        {
+            {},  // thread args (EVT args, set below)
+            nullptr,  // C ptr (unused)
+            stride_C,
+            reinterpret_cast<ElementD*>(logits_dummy.data_ptr<float>()),
+            stride_D
+        },
+        hw_info
+    };
+
+    // ── Allocate per-tile output tensors ──
+    constexpr int tile_M_val = decltype(get<0>(TileShape_EVT{}))::value;
+    int n_tiles_m = (V + tile_M_val - 1) / tile_M_val;
+
+    auto tile_max_vals = torch::empty({n_tiles_m, H}, torch::dtype(torch::kFloat32).device(weights.device()));
+    auto tile_max_idxs = torch::empty({n_tiles_m, H}, torch::dtype(torch::kInt32).device(weights.device()));
+
+    // EVT thread args: (AccFetch_args, RowArgmax_args)
+    arguments.epilogue.thread = {
+        {},  // AccFetch: no args
+        {    // RowArgmax: {ptr_row, dRow, ptr_tile_vals, ptr_tile_idxs, H}
+            reinterpret_cast<int32_t*>(argmax_dummy.data_ptr<int32_t>()),
+            {},   // Stride<_0, _1, _0>{}
+            tile_max_vals.data_ptr<float>(),
+            tile_max_idxs.data_ptr<int32_t>(),
+            H
+        }
+    };
+
+    Gemm_Argmax gemm_op;
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS Argmax GEMM cannot be implemented: ",
+        cutlass::cutlassGetStatusString(status));
+
+    size_t workspace_size = Gemm_Argmax::get_workspace_size(arguments);
+    auto workspace = torch::empty(
+        {static_cast<int64_t>(workspace_size)},
+        torch::dtype(torch::kUInt8).device(weights.device()));
+
+    status = gemm_op.initialize(arguments, workspace.data_ptr(), stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS Argmax GEMM initialization failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    status = gemm_op.run(stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS Argmax GEMM execution failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    return {tile_max_vals, tile_max_idxs};
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fmms_cutlass_stage1", &fmms_cutlass_stage1,
           "FMMS Stage 1 using CUTLASS 3.x GEMM + Gumbel argmax (SM90)");
@@ -634,4 +865,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Test EVT epilogue: returns matmul(W, hs.T) + 1.0 (SM90)");
     m.def("test_evt_row_reduce", &test_evt_row_reduce,
           "Test EVT epilogue: returns (logits, max_per_column) where max is across V (SM90)");
+    m.def("test_row_argmax", &test_row_argmax,
+          "2-stage row argmax: GEMM + per-tile argmax, returns (tile_max_vals, tile_max_idxs) (SM90)");
 }

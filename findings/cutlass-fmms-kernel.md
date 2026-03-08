@@ -75,7 +75,15 @@ Validates the reduction mechanism before adding argmax complexity.
 
 Build the custom `VisitorRowArgmax` visitor. Split into sub-steps:
 
-**5a: Argmax reduction (no noise, no temperature).** Track `(value, index)` pairs in the reduction. Validate indices are correct against a reference matmul + argmax.
+**5a: Argmax reduction (no noise, no temperature).** ✅ Track `(value, index)` pairs in the reduction. Validate indices are correct against a reference matmul + argmax.
+
+**Done.** Key implementation details:
+- Custom `Sm90RowArgmax` EVT visitor modeled after `Sm90RowReduction`. Tracks `ValIdx {float val; int32_t idx}` pairs (8 bytes = uint64_t for warp shuffle).
+- 2-stage approach: CUTLASS GEMM with EVT epilogue does per-CTA-tile argmax (no intermediate [V,H] logits buffer). Python reduces across V-tiles.
+- Critical bug fix: `visit()` receives fragment values in accumulator (source) layout, but `args.tCcD` provides coordinates in destination (output) layout. These layouts differ on SM90. Fix: create a separate coordinate tensor with `sm90_partition_for_epilogue<true>(identity_tensor, ...)` to get accumulator-layout M coordinates. Keep `args.tCcD` for bounds checking only (bounds checking doesn't need correct M coordinates).
+- Per-tile results written to explicit output arrays via atomic-counter-gated `end()` callback.
+- Warp shuffle reduction uses `__shfl_xor_sync` / `__shfl_down_sync` with `uint64_t` reinterpretation of `ValIdx`.
+- Verified on Modal H100: all tests pass (V=256/1024/151936, H=1/4/7).
 
 **5b: Add temperature scaling.** Pass `inv_temperature` as a scalar broadcast. Verify logits are scaled correctly.
 

@@ -10,8 +10,15 @@ POSTFIX :=
 VOLUME_DIR_NAME := triton-bench-$(GPU)$(POSTFIX)
 TRITON_BENCH_DIR := benchmarking/modal-results/$(VOLUME_DIR_NAME)
 
+NAME :=
+modal-test-cutlass:
+	modal run -m src.fused_mm_sampling.modal_lib.modal_test_evt --test sampling
+
 modal-speed-test:
-	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test
+	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test $(if $(NAME),--name "$(NAME)",)
+
+modal-speed-test-cutlass:
+	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test --name "fused-triton,fused-cutlass"
 
 modal-triton-benchmark: modal-create-results-triton-bench modal-get-results-triton-bench modal-plot-triton-bench
 

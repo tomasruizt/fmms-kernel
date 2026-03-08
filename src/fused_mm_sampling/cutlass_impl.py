@@ -141,6 +141,26 @@ def test_evt_row_reduce(
     return mod.test_evt_row_reduce(weights, hidden_states)
 
 
+def test_row_argmax(
+    weights: torch.Tensor,  # [V, D] bfloat16
+    hidden_states: torch.Tensor,  # [H, D] bfloat16
+) -> torch.Tensor:
+    """2-stage row argmax: GEMM + per-tile argmax + Python reduction.
+
+    argmax_indices = argmax(matmul(weights, hidden_states.T), dim=0)  shape [H]
+
+    Stage 1: CUTLASS GEMM produces logits [V, H], then a per-tile argmax
+    kernel reduces each tile of TILE_V rows to (max_val, argmax_idx).
+    Stage 2: Python reduces across tiles to get the global argmax.
+    """
+    mod = _get_module()
+    tile_max_vals, tile_max_idxs = mod.test_row_argmax(weights, hidden_states)
+    # Stage 2: reduce across V-tiles
+    best_tiles = tile_max_vals.argmax(dim=0)  # [H]
+    argmax_idxs = tile_max_idxs.gather(0, best_tiles.unsqueeze(0).to(torch.int32)).squeeze(0)
+    return argmax_idxs.to(torch.int64)
+
+
 def fused_mm_sample_cutlass(
     weights: torch.Tensor,  # [V, D] bfloat16
     hidden_states: torch.Tensor,  # [H, D] bfloat16
@@ -152,6 +172,13 @@ def fused_mm_sample_cutlass(
     V, D = weights.shape  # noqa: N806
     H = hidden_states.shape[0]  # noqa: N806
     assert hidden_states.shape[1] == D
+
+    # CUTLASS TMA requires D aligned to 8 for bf16 (16 bytes).
+    # Zero-pad doesn't affect matmul results for original columns.
+    D_aligned = ((D + 7) // 8) * 8  # noqa: N806
+    if D_aligned != D:
+        weights = torch.nn.functional.pad(weights, (0, D_aligned - D))
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, D_aligned - D))
 
     n_tiles_v = (V + TILE_V - 1) // TILE_V
 

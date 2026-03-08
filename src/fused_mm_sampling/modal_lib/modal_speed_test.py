@@ -16,5 +16,6 @@ def speed_test(args: Args):
 
 
 @app.local_entrypoint()
-def main():
-    speed_test.remote(args=args)
+def main(name: str = ""):
+    a = args if not name else args.model_copy(update={"name": name})
+    speed_test.remote(args=a)
