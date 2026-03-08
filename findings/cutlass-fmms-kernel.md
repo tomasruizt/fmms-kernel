@@ -35,20 +35,26 @@ Fix any compilation issues that arise from the CUDA 13.0 / SM90 environment.
 
 Added `nvidia-cutlass` and `cuda-bench` to the Modal image deps in `utils.py`.
 
-### Step 3: Simple EVT epilogue (add 1)
+### Step 3: Simple EVT epilogue (add 1) ✅
 
 Wire up the Sm90EVT plumbing with a trivial epilogue that adds 1 to every accumulator element:
 
 ```cpp
-using Epilogue = Sm90EVT<Sm90AuxStore,
-  Sm90EVT<Sm90Compute<plus>,
-    Sm90ScalarBroadcast<float>,  // 1.0f
+using CustomEVT = Sm90EVT<
+    Sm90Compute<cutlass::plus, ElementD, ElementCompute, RoundStyle>,
+    Sm90ScalarBroadcast<ElementCompute>,
     Sm90AccFetch
-  >
 >;
 ```
 
 This validates the EVT infrastructure works end-to-end without any custom visitors.
+
+**Done.** Key implementation details:
+- EVTs require `TmaWarpSpecialized` epilogue schedule (not `EpilogueScheduleAuto`).
+- TMA stores need 16B alignment: `AlignmentC=AlignmentD=4` for float32 (4 * 4 bytes). H is padded to a multiple of 4 in the Python wrapper.
+- The `EpilogueTileAuto` selection must produce a tile where `EPI_TILE_M >= MMA_TILE_M`. With float32 alignment 4, the auto tile (64x32) is too small for TileShape M=128. Fixed by using `TileShape_EVT = Shape<_64, _64, _64>` for the EVT path.
+- EVT thread args follow the recursive tree structure: `{scalar_broadcast_args, acc_fetch_args, compute_args}`.
+- Verified on Modal H100: max_err=0.0024 for V=151,936, D=4,096, H=4 (bf16 accumulation error).
 
 ### Step 4: Column reduction epilogue (max across V)
 

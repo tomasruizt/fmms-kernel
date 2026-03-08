@@ -22,6 +22,8 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
+// EVT (Epilogue Visitor Tree) includes
+#include "cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp"
 
 using namespace cute;
 
@@ -94,6 +96,66 @@ using StrideA = typename Gemm::GemmKernel::StrideA;
 using StrideB = typename Gemm::GemmKernel::StrideB;
 using StrideC = typename Gemm::GemmKernel::StrideC;
 using StrideD = typename Gemm::GemmKernel::StrideD;
+
+// ──────────────────── EVT GEMM: D = acc + scalar ────────────────────
+//
+// Epilogue Visitor Tree that adds a scalar to every accumulator element.
+// Used to validate the EVT infrastructure before building the full FMMS epilogue.
+//
+// EVTs require TMA warp-specialized epilogue, which needs 16B-aligned stores.
+// For float32 output, AlignmentD >= 4 (4 * 4 bytes = 16 bytes).
+// H must be padded to a multiple of 4 in the Python wrapper.
+
+// EVT requires TMA warp-specialized epilogue, which requires 16B-aligned stores.
+// For float32 output: AlignmentD >= 4 (4 * 4B = 16B).
+// The epilogue tile auto-selection must produce a tile where EPI_TILE_M >= MMA_TILE_M.
+// With float32 and alignment 4, the auto tile is too small for TileShape M=128.
+// Use a smaller CTA tile (64x64x64) for the EVT path to avoid this mismatch.
+static constexpr int AlignmentC_EVT = 4;
+static constexpr int AlignmentD_EVT = 4;
+static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
+
+using TileShape_EVT = Shape<_64, _64, _64>;
+
+// D = acc + scalar
+using CustomEVT = cutlass::epilogue::fusion::Sm90EVT<
+    cutlass::epilogue::fusion::Sm90Compute<cutlass::plus, ElementD, ElementCompute, RoundStyle>,
+    cutlass::epilogue::fusion::Sm90ScalarBroadcast<ElementCompute>,  // scalar value
+    cutlass::epilogue::fusion::Sm90AccFetch                          // accumulator
+>;
+
+using CollectiveEpilogue_EVT = typename cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    TileShape_EVT, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementCompute,
+    ElementC, LayoutC, AlignmentC_EVT,
+    ElementD, LayoutD, AlignmentD_EVT,
+    cutlass::epilogue::TmaWarpSpecialized,
+    CustomEVT
+>::CollectiveOp;
+
+using CollectiveMainloop_EVT = typename cutlass::gemm::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape_EVT, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<
+        static_cast<int>(sizeof(typename CollectiveEpilogue_EVT::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto
+>::CollectiveOp;
+
+using GemmKernel_EVT = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int, int, int>,
+    CollectiveMainloop_EVT,
+    CollectiveEpilogue_EVT
+>;
+
+using Gemm_EVT = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_EVT>;
+
+using StrideC_EVT = typename Gemm_EVT::GemmKernel::StrideC;
+using StrideD_EVT = typename Gemm_EVT::GemmKernel::StrideD;
 
 
 // ──────────────────── Gumbel noise + tiled argmax kernel ────────────────────
@@ -281,7 +343,112 @@ void fmms_cutlass_stage1(
 }
 
 
+// ──────────────────────── EVT test: D = acc + 1 ────────────────────────
+
+torch::Tensor test_evt_add1(
+    torch::Tensor weights,        // [V, D] bfloat16
+    torch::Tensor hidden_states   // [H, D] bfloat16
+) {
+    TORCH_CHECK(weights.is_cuda(), "weights must be CUDA");
+    TORCH_CHECK(hidden_states.is_cuda(), "hidden_states must be CUDA");
+    TORCH_CHECK(weights.dtype() == torch::kBFloat16, "weights must be bfloat16");
+    TORCH_CHECK(hidden_states.dtype() == torch::kBFloat16, "hidden_states must be bfloat16");
+    TORCH_CHECK(weights.is_contiguous(), "weights must be contiguous");
+    TORCH_CHECK(hidden_states.is_contiguous(), "hidden_states must be contiguous");
+
+    int V = weights.size(0);
+    int D = weights.size(1);
+    int H = hidden_states.size(0);
+    TORCH_CHECK(hidden_states.size(1) == D,
+        "hidden_states dim 1 (", hidden_states.size(1), ") != weights dim 1 (", D, ")");
+
+    // EVT requires H padded to multiple of AlignmentD_EVT (4 for float32)
+    int H_padded = ((H + AlignmentD_EVT - 1) / AlignmentD_EVT) * AlignmentD_EVT;
+    bool needs_padding = (H_padded != H);
+
+    // Pad hidden_states if needed (zero-pad doesn't affect matmul results for original columns)
+    torch::Tensor hs_padded = hidden_states;
+    if (needs_padding) {
+        hs_padded = torch::zeros({H_padded, D}, hidden_states.options());
+        hs_padded.narrow(0, 0, H).copy_(hidden_states);
+    }
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    auto logits = torch::empty({V, H_padded}, torch::dtype(torch::kFloat32).device(weights.device()));
+
+    // Reuse StrideA/StrideB from the non-EVT GEMM (same layout for A and B)
+    StrideA stride_A{int64_t(D), {}, int64_t(0)};
+    StrideA stride_B{int64_t(D), {}, int64_t(0)};
+    // EVT strides may differ from non-EVT due to different alignment
+    StrideC_EVT stride_C{int64_t(H_padded), {}, int64_t(0)};
+    StrideD_EVT stride_D{int64_t(H_padded), {}, int64_t(0)};
+
+    int device_id = weights.get_device();
+    cutlass::KernelHardwareInfo hw_info;
+    hw_info.device_id = device_id;
+    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id);
+
+    typename Gemm_EVT::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {V, H_padded, D},
+        {
+            reinterpret_cast<ElementA const*>(weights.data_ptr<at::BFloat16>()),
+            stride_A,
+            reinterpret_cast<ElementB const*>(hs_padded.data_ptr<at::BFloat16>()),
+            stride_B
+        },
+        {
+            {},  // thread args (EVT args, set below)
+            nullptr,  // C ptr (unused)
+            stride_C,
+            reinterpret_cast<ElementD*>(logits.data_ptr<float>()),
+            stride_D
+        },
+        hw_info
+    };
+
+    // EVT thread args: {scalar_broadcast_args, acc_fetch_args, compute_args}
+    // Sm90ScalarBroadcast args: {{scalar_value}, {scalar_ptr}, {stride}}
+    arguments.epilogue.thread = {
+        {{1.0f}},  // Sm90ScalarBroadcast: add 1.0f
+        {},        // Sm90AccFetch: no args
+        {}         // Sm90Compute<plus>: no args
+    };
+
+    Gemm_EVT gemm_op;
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS EVT GEMM cannot be implemented: ",
+        cutlass::cutlassGetStatusString(status));
+
+    size_t workspace_size = Gemm_EVT::get_workspace_size(arguments);
+    auto workspace = torch::empty(
+        {static_cast<int64_t>(workspace_size)},
+        torch::dtype(torch::kUInt8).device(weights.device()));
+
+    status = gemm_op.initialize(arguments, workspace.data_ptr(), stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS EVT GEMM initialization failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    status = gemm_op.run(stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS EVT GEMM execution failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    // Slice back to original H if we padded
+    if (needs_padding) {
+        return logits.narrow(1, 0, H).contiguous();
+    }
+    return logits;
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fmms_cutlass_stage1", &fmms_cutlass_stage1,
           "FMMS Stage 1 using CUTLASS 3.x GEMM + Gumbel argmax (SM90)");
+    m.def("test_evt_add1", &test_evt_add1,
+          "Test EVT epilogue: returns matmul(W, hs.T) + 1.0 (SM90)");
 }

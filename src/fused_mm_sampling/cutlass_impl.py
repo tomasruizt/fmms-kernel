@@ -93,6 +93,19 @@ def _get_module():
 TILE_V = 128
 
 
+def test_evt_add1(
+    weights: torch.Tensor,  # [V, D] bfloat16
+    hidden_states: torch.Tensor,  # [H, D] bfloat16
+) -> torch.Tensor:
+    """Test EVT epilogue: returns matmul(weights, hidden_states.T) + 1.0.
+
+    Validates that the Epilogue Visitor Tree infrastructure works end-to-end
+    by adding a scalar (1.0) to every accumulator element.
+    """
+    mod = _get_module()
+    return mod.test_evt_add1(weights, hidden_states)
+
+
 def fused_mm_sample_cutlass(
     weights: torch.Tensor,  # [V, D] bfloat16
     hidden_states: torch.Tensor,  # [H, D] bfloat16
