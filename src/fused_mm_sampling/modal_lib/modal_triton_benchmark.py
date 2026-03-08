@@ -12,6 +12,9 @@ case = os.getenv("CASE", "all")
 
 @app.function(gpu=gpu, image=make_image(), volumes=make_volumes(), timeout=10 * 60)
 def function(args: Args):
+    from .utils import enable_cuda_jit_cache
+
+    enable_cuda_jit_cache()
     run_triton_bechmark(args)
 
 

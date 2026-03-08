@@ -10,6 +10,8 @@
 //
 // Requires: SM90+ (H100), CUTLASS 3.x headers (pip install nvidia-cutlass)
 
+#include <limits>
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
@@ -24,6 +26,7 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 // EVT (Epilogue Visitor Tree) includes
 #include "cutlass/epilogue/fusion/sm90_callbacks_tma_warpspecialized.hpp"
+#include "cutlass/epilogue/thread/activation.h"  // Identity<T>
 
 using namespace cute;
 
@@ -156,6 +159,74 @@ using Gemm_EVT = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_EVT>;
 
 using StrideC_EVT = typename Gemm_EVT::GemmKernel::StrideC;
 using StrideD_EVT = typename Gemm_EVT::GemmKernel::StrideD;
+
+
+// ──────────────────── EVT GEMM: D = acc, row_max = max(acc, dim=M) ────────────────────
+//
+// Row reduction: reduces across M (V dimension) using maximum, producing one
+// value per N (H) column.  The D store writes the full logits matrix so we can
+// cross-check the reduction result.
+//
+// EVT tree:
+//   root: Sm90Compute<Identity>  →  stores to D (pass-through)
+//     └── Sm90EVT
+//           ├── Sm90RowReduction<maximum>  →  stores to ptr_row
+//           └── Sm90AccFetch               →  provides accumulator values
+
+using RowReduceEVT = cutlass::epilogue::fusion::Sm90EVT<
+    // root: identity — stores to D, passes values through unchanged
+    cutlass::epilogue::fusion::Sm90Compute<
+        cutlass::epilogue::thread::Identity, ElementD, ElementCompute, RoundStyle>,
+    // child 0: inner EVT with row reduction + acc fetch
+    cutlass::epilogue::fusion::Sm90EVT<
+        cutlass::epilogue::fusion::Sm90RowReduction<
+            cutlass::maximum,       // register-level reduce
+            cutlass::maximum,       // warp-level shuffle reduce
+            cutlass::maximum,       // global memory reduce
+            0,                      // stages (must be 0)
+            TileShape_EVT,
+            ElementD,               // output element type
+            ElementCompute,         // compute element type
+            RoundStyle,
+            Stride<_0, _1, _0>,     // StrideMNL: M=0 (reduced), N=1, L=0
+            AlignmentD_EVT          // alignment (4 for float32 → 16B)
+        >,
+        cutlass::epilogue::fusion::Sm90AccFetch
+    >
+>;
+
+using CollectiveEpilogue_RowReduce = typename cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    TileShape_EVT, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementCompute,
+    ElementC, LayoutC, AlignmentC_EVT,
+    ElementD, LayoutD, AlignmentD_EVT,
+    cutlass::epilogue::TmaWarpSpecialized,
+    RowReduceEVT
+>::CollectiveOp;
+
+using CollectiveMainloop_RowReduce = typename cutlass::gemm::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape_EVT, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<
+        static_cast<int>(sizeof(typename CollectiveEpilogue_RowReduce::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto
+>::CollectiveOp;
+
+using GemmKernel_RowReduce = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int, int, int>,
+    CollectiveMainloop_RowReduce,
+    CollectiveEpilogue_RowReduce
+>;
+
+using Gemm_RowReduce = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_RowReduce>;
+
+using StrideC_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideC;
+using StrideD_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideD;
 
 
 // ──────────────────── Gumbel noise + tiled argmax kernel ────────────────────
@@ -446,9 +517,121 @@ torch::Tensor test_evt_add1(
 }
 
 
+// ──────────────────────── EVT test: row reduce (max across V) ────────────────────────
+
+std::vector<torch::Tensor> test_evt_row_reduce(
+    torch::Tensor weights,        // [V, D] bfloat16
+    torch::Tensor hidden_states   // [H, D] bfloat16
+) {
+    TORCH_CHECK(weights.is_cuda(), "weights must be CUDA");
+    TORCH_CHECK(hidden_states.is_cuda(), "hidden_states must be CUDA");
+    TORCH_CHECK(weights.dtype() == torch::kBFloat16, "weights must be bfloat16");
+    TORCH_CHECK(hidden_states.dtype() == torch::kBFloat16, "hidden_states must be bfloat16");
+    TORCH_CHECK(weights.is_contiguous(), "weights must be contiguous");
+    TORCH_CHECK(hidden_states.is_contiguous(), "hidden_states must be contiguous");
+
+    int V = weights.size(0);
+    int D = weights.size(1);
+    int H = hidden_states.size(0);
+    TORCH_CHECK(hidden_states.size(1) == D,
+        "hidden_states dim 1 (", hidden_states.size(1), ") != weights dim 1 (", D, ")");
+
+    // EVT requires H padded to multiple of AlignmentD_EVT (4 for float32)
+    int H_padded = ((H + AlignmentD_EVT - 1) / AlignmentD_EVT) * AlignmentD_EVT;
+    bool needs_padding = (H_padded != H);
+
+    torch::Tensor hs_padded = hidden_states;
+    if (needs_padding) {
+        hs_padded = torch::zeros({H_padded, D}, hidden_states.options());
+        hs_padded.narrow(0, 0, H).copy_(hidden_states);
+    }
+
+    auto stream = at::cuda::getCurrentCUDAStream();
+
+    // D output: full logits [V, H_padded]
+    auto logits = torch::empty({V, H_padded}, torch::dtype(torch::kFloat32).device(weights.device()));
+    // Row reduction output: max across V, shape [H_padded]
+    auto row_max = torch::empty({H_padded}, torch::dtype(torch::kFloat32).device(weights.device()));
+
+    StrideA stride_A{int64_t(D), {}, int64_t(0)};
+    StrideA stride_B{int64_t(D), {}, int64_t(0)};
+    StrideC_RowReduce stride_C{int64_t(H_padded), {}, int64_t(0)};
+    StrideD_RowReduce stride_D{int64_t(H_padded), {}, int64_t(0)};
+
+    int device_id = weights.get_device();
+    cutlass::KernelHardwareInfo hw_info;
+    hw_info.device_id = device_id;
+    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id);
+
+    typename Gemm_RowReduce::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {V, H_padded, D},
+        {
+            reinterpret_cast<ElementA const*>(weights.data_ptr<at::BFloat16>()),
+            stride_A,
+            reinterpret_cast<ElementB const*>(hs_padded.data_ptr<at::BFloat16>()),
+            stride_B
+        },
+        {
+            {},  // thread args (EVT args, set below)
+            nullptr,  // C ptr (unused)
+            stride_C,
+            reinterpret_cast<ElementD*>(logits.data_ptr<float>()),
+            stride_D
+        },
+        hw_info
+    };
+
+    // EVT thread args follow the tree structure:
+    //   outer: (Child0_args, NodeOp_args)
+    //   Child0 is inner EVT: (AccFetch_args, RowReduction_args)
+    arguments.epilogue.thread = {
+        {   // Child 0: inner Sm90EVT
+            {},  // AccFetch: no args
+            {    // RowReduction: {ptr_row, reduction_identity, dRow}
+                reinterpret_cast<ElementD*>(row_max.data_ptr<float>()),
+                -std::numeric_limits<ElementCompute>::infinity(),
+                {}   // Stride<_0, _1, _0>{}
+            }
+        },
+        {}   // NodeOp: Compute<Identity> — no args
+    };
+
+    Gemm_RowReduce gemm_op;
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS RowReduce GEMM cannot be implemented: ",
+        cutlass::cutlassGetStatusString(status));
+
+    size_t workspace_size = Gemm_RowReduce::get_workspace_size(arguments);
+    auto workspace = torch::empty(
+        {static_cast<int64_t>(workspace_size)},
+        torch::dtype(torch::kUInt8).device(weights.device()));
+
+    status = gemm_op.initialize(arguments, workspace.data_ptr(), stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS RowReduce GEMM initialization failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    status = gemm_op.run(stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS RowReduce GEMM execution failed: ",
+        cutlass::cutlassGetStatusString(status));
+
+    // Slice back to original H if we padded
+    if (needs_padding) {
+        return {logits.narrow(1, 0, H).contiguous(), row_max.narrow(0, 0, H).contiguous()};
+    }
+    return {logits, row_max};
+}
+
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fmms_cutlass_stage1", &fmms_cutlass_stage1,
           "FMMS Stage 1 using CUTLASS 3.x GEMM + Gumbel argmax (SM90)");
     m.def("test_evt_add1", &test_evt_add1,
           "Test EVT epilogue: returns matmul(W, hs.T) + 1.0 (SM90)");
+    m.def("test_evt_row_reduce", &test_evt_row_reduce,
+          "Test EVT epilogue: returns (logits, max_per_column) where max is across V (SM90)");
 }

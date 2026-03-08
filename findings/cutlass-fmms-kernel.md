@@ -56,11 +56,20 @@ This validates the EVT infrastructure works end-to-end without any custom visito
 - EVT thread args follow the recursive tree structure: `{scalar_broadcast_args, acc_fetch_args, compute_args}`.
 - Verified on Modal H100: max_err=0.0024 for V=151,936, D=4,096, H=4 (bf16 accumulation error).
 
-### Step 4: Column reduction epilogue (max across V)
+### Step 4: Row reduction epilogue (max across V) ✅
 
-Replace the add-1 epilogue with `Sm90ColReduction` using `cutlass::maximum<float>`.
-This reduces across the V/M dimension and outputs one value per H/N column.
-Validates the reduction dimension is correct before adding argmax complexity.
+Replace the add-1 epilogue with `Sm90RowReduction` using `cutlass::maximum<float>`.
+This reduces across the M/V dimension and outputs one max value per N/H column.
+Validates the reduction mechanism before adding argmax complexity.
+
+**Done.** Key implementation details:
+- CUTLASS naming: "Row reduction" = reduce across M (rows), output shape [N]. "Col reduction" = reduce across N (columns), output shape [M]. We need row reduction since M=V is the dimension to reduce.
+- EVT tree: `Sm90Compute<Identity>` as root (stores full logits to D), with inner `Sm90EVT<Sm90RowReduction<maximum>, Sm90AccFetch>`. The reduction is a pass-through that stores to `ptr_row` while forwarding values to the root.
+- `Sm90RowReduction` requires workspace for a reduction buffer and tile counters (coordinating partial reductions across CTA tiles). The GEMM adapter handles workspace allocation automatically.
+- Reduction identity for `maximum` is `-infinity` (`-std::numeric_limits<float>::infinity()`).
+- Stride for row reduction output: `Stride<_0, _1, _0>` (M=0 reduced, N=1 stride-1, L=0).
+- Thread args follow the tree: `{inner_evt_args{acc_fetch_args, row_reduction_args}, identity_compute_args}`.
+- Verified on Modal H100: max_err=0.0014 for V=151,936, D=4,096, H=4.
 
 ### Step 5: Full FMMS epilogue
 

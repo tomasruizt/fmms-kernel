@@ -106,6 +106,21 @@ def test_evt_add1(
     return mod.test_evt_add1(weights, hidden_states)
 
 
+def test_evt_row_reduce(
+    weights: torch.Tensor,  # [V, D] bfloat16
+    hidden_states: torch.Tensor,  # [H, D] bfloat16
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Test EVT row reduction: returns (logits, row_max).
+
+    logits = matmul(weights, hidden_states.T)  shape [V, H]
+    row_max = max(logits, dim=0).values         shape [H]
+
+    Validates that Sm90RowReduction with maximum works correctly.
+    """
+    mod = _get_module()
+    return mod.test_evt_row_reduce(weights, hidden_states)
+
+
 def fused_mm_sample_cutlass(
     weights: torch.Tensor,  # [V, D] bfloat16
     hidden_states: torch.Tensor,  # [H, D] bfloat16

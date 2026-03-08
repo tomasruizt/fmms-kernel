@@ -26,3 +26,15 @@ volume_path = "/vol-fused-mm-sample"
 
 def make_volumes():
     return {volume_path: modal.Volume.from_name("fused-mm-sample")}
+
+
+def enable_cuda_jit_cache():
+    """Persist JIT-compiled CUDA extensions on the Modal volume.
+
+    Call this at the start of any Modal function that JIT-compiles CUDA code
+    (e.g. CUTLASS kernels via torch.utils.cpp_extension.load()). Subsequent
+    runs with unchanged source skip the expensive nvcc compilation.
+    """
+    import os
+
+    os.environ["TORCH_EXTENSIONS_DIR"] = f"{volume_path}/cache/torch_extensions"
