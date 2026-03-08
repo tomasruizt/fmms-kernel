@@ -9,6 +9,9 @@ app = make_app()
 
 @app.function(gpu="H100", image=make_image(), volumes=make_volumes(), timeout=20 * 60)
 def speed_test(args: Args):
+    from .utils import enable_cuda_jit_cache
+
+    enable_cuda_jit_cache()
     run_speed_test(args)
 
 

@@ -74,9 +74,15 @@ def _get_module():
 
     # SM90+ needs the 'a' suffix for TMA/WGMMA instructions
     sm_gencode = f"{sm}a"
+    name = "fmms_cutlass"
 
+    import time
+
+    had_cache = _find_cached_so(name) is not None
+
+    t0 = time.monotonic()
     _module = load(
-        name="fmms_cutlass",
+        name=name,
         sources=[str(_CSRC_DIR / "fmms_cutlass_kernel.cu")],
         extra_include_paths=[cutlass_include],
         extra_cuda_cflags=[
@@ -87,7 +93,21 @@ def _get_module():
         ],
         verbose=os.environ.get("FMMS_CUDA_VERBOSE", "") == "1",
     )
+    elapsed = time.monotonic() - t0
+    print(
+        f"CUTLASS FMMS kernel loaded ({'likely cached' if had_cache else 'likely compiled'}) in {elapsed:.1f}s"
+    )
     return _module
+
+
+def _find_cached_so(name: str) -> Path | None:
+    """Return path to a cached .so for a JIT extension, or None if not cached."""
+    from torch.utils.cpp_extension import _get_build_directory
+
+    build_dir = Path(_get_build_directory(name, verbose=False))
+    # torch appends _v{version} when sources change; glob for any version.
+    matches = sorted(build_dir.parent.glob(f"{name}*/{name}*.so"))
+    return matches[0] if matches else None
 
 
 TILE_V = 128
