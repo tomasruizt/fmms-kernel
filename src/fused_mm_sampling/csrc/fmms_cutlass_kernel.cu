@@ -1,76 +1,99 @@
-// Fused Matrix-Multiply & Sampling (FMMS) — CUTLASS implementation
+// Fused Matrix-Multiply & Sampling (FMMS) — CUTLASS 3.x implementation (SM90)
 //
-// Single CUTLASS GEMM for the full matmul, then a tiled Gumbel-max
-// sampling kernel on the resulting logits.
+// Uses CUTLASS 3.x GemmUniversal with collective builders and TMA for the
+// matmul, followed by a tiled Gumbel-max sampling kernel.
 //
-// Two-stage approach (same as Triton/CUDA variants):
-//   Stage 1a: CUTLASS GEMM — logits = W @ hs.T  (single launch)
-//   Stage 1b: Custom kernel — scale by temperature, add Gumbel noise, tiled argmax
+// Two-stage approach:
+//   Stage 1a: CUTLASS 3.x GEMM (logits = W @ hs.T)
+//   Stage 1b: Custom kernel (scale by temperature, add Gumbel noise, tiled argmax)
 //   Stage 2:  Python-side reduction across V-tiles
 //
-// Requires: CUTLASS 3.x headers (pip install nvidia-cutlass or set CUTLASS_PATH)
+// Requires: SM90+ (H100), CUTLASS 3.x headers (pip install nvidia-cutlass)
 
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <curand_kernel.h>
 
-// CUTLASS includes
-#include <cutlass/cutlass.h>
-#include <cutlass/gemm/device/gemm.h>
-#include <cutlass/layout/matrix.h>
-#include <cutlass/numeric_types.h>
-#include <cutlass/epilogue/thread/linear_combination.h>
+// CUTLASS 3.x includes
+#include "cute/tensor.hpp"
+#include "cutlass/cutlass.h"
+#include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/kernel/gemm_universal.hpp"
+
+using namespace cute;
 
 // ──────────────────────── constants ────────────────────────
 
-static constexpr int TILE_V = 128;   // V-tile size for sampling (matches other implementations)
+static constexpr int TILE_V = 128;
 static constexpr int SAMPLING_THREADS = 256;
 
-// ──────────────────────── CUTLASS GEMM type aliases ────────────────────────
+// ──────────────────────── CUTLASS 3.x GEMM type aliases ────────────────────────
 
-// GEMM: [V, D] x [D, H] -> [V, H]
-// A = weights: [V, D], row-major, bfloat16
-// B = hidden_states^T: [D, H], column-major (i.e. hidden_states [H, D] row-major)
-// C = logits: [V, H], row-major, float32
+// GEMM: [V, D] x [D, H] -> [V, H]   (M=V, N=H, K=D)
+// A = weights:       [V, D] row-major,   bfloat16
+// B = hidden_states: [H, D] row-major = [D, H] col-major, bfloat16
+// D = logits:        [V, H] row-major,   float32
 
-using ElementA = cutlass::bfloat16_t;
-using ElementB = cutlass::bfloat16_t;
-using ElementC = float;
+using ElementA           = cutlass::bfloat16_t;
+using ElementB           = cutlass::bfloat16_t;
+using ElementC           = float;
+using ElementD           = float;
 using ElementAccumulator = float;
+using ElementCompute     = float;
 
-using LayoutA = cutlass::layout::RowMajor;     // W [V, D]
-using LayoutB = cutlass::layout::ColumnMajor;   // hs [H, D] row-major = [D, H] col-major
-using LayoutC = cutlass::layout::RowMajor;      // logits [V, H]
+using LayoutA = cutlass::layout::RowMajor;
+using LayoutB = cutlass::layout::ColumnMajor;
+using LayoutC = cutlass::layout::RowMajor;
+using LayoutD = cutlass::layout::RowMajor;
 
-// Alignment of 8 elements (16 bytes for bf16) for efficient cp_async in the
-// multistage pipeline. This constrains the K dimension (D) to be divisible by 8,
-// which holds for all LLM hidden sizes (2048, 4096, 8192, ...).
-static constexpr int kAlignmentA = 8;
-static constexpr int kAlignmentB = 8;
-static constexpr int kEpilogueElements = 1;
+// 16B alignment for bf16 TMA loads (8 elements x 2 bytes)
+static constexpr int AlignmentA = 8;
+static constexpr int AlignmentB = 8;
+// Alignment of 1 to support arbitrary H (including H=1 for decode)
+static constexpr int AlignmentC = 1;
+static constexpr int AlignmentD = 1;
 
-using Gemm = cutlass::gemm::device::Gemm<
-    ElementA, LayoutA,          // A matrix
-    ElementB, LayoutB,          // B matrix
-    ElementC, LayoutC,          // C matrix
-    ElementAccumulator,         // Accumulator
-    cutlass::arch::OpClassTensorOp,  // Use tensor cores
-    cutlass::arch::Sm80,        // Target SM80 (works on 80, 86, 89, 90)
-    cutlass::gemm::GemmShape<64, 64, 32>,    // Threadblock tile
-    cutlass::gemm::GemmShape<32, 32, 32>,    // Warp tile
-    cutlass::gemm::GemmShape<16, 8, 16>,     // MMA instruction (bf16 tensor core)
-    cutlass::epilogue::thread::LinearCombination<
-        ElementC,               // Output type
-        kEpilogueElements,      // Elements per access (1 for arbitrary H)
-        ElementAccumulator,     // Accumulator type
-        ElementAccumulator      // Compute type
-    >,
-    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    3,                          // Pipeline stages
-    kAlignmentA,                // A alignment
-    kAlignmentB                 // B alignment
+using TileShape    = Shape<_128, _128, _64>;
+using ClusterShape = Shape<_1, _1, _1>;
+
+// Build the epilogue collective (D = alpha * Acc + beta * C)
+using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    TileShape, ClusterShape,
+    cutlass::epilogue::collective::EpilogueTileAuto,
+    ElementAccumulator, ElementCompute,
+    ElementC, LayoutC, AlignmentC,
+    ElementD, LayoutD, AlignmentD,
+    cutlass::epilogue::collective::EpilogueScheduleAuto
+>::CollectiveOp;
+
+// Build the mainloop collective (auto stage count, carves out epilogue smem)
+using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+    ElementA, LayoutA, AlignmentA,
+    ElementB, LayoutB, AlignmentB,
+    ElementAccumulator,
+    TileShape, ClusterShape,
+    cutlass::gemm::collective::StageCountAutoCarveout<
+        static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto
+>::CollectiveOp;
+
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int, int, int>,
+    CollectiveMainloop,
+    CollectiveEpilogue
 >;
+
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
+using StrideA = typename Gemm::GemmKernel::StrideA;
+using StrideB = typename Gemm::GemmKernel::StrideB;
+using StrideC = typename Gemm::GemmKernel::StrideC;
+using StrideD = typename Gemm::GemmKernel::StrideD;
 
 
 // ──────────────────── Gumbel noise + tiled argmax kernel ────────────────────
@@ -84,12 +107,13 @@ __global__ void gumbel_argmax_kernel(
     const float* __restrict__ logits,       // [V, H], row-major
     float*       __restrict__ max_out,      // [n_tiles_v, H, num_samples]
     int64_t*     __restrict__ max_out_idx,  // [n_tiles_v, H, num_samples]
-    float inv_temperature,
+    const float* __restrict__ temperature_ptr,  // 0-d tensor on GPU (no CPU-GPU sync)
     int V,
-    int H,                                  // number of hidden states (stride)
+    int H,
     int num_samples,
     unsigned long long base_seed
 ) {
+    const float inv_temperature = 1.0f / __ldg(temperature_ptr);
     const int tile_id = blockIdx.x;
     const int h_idx = blockIdx.y;
     if (h_idx >= H) return;
@@ -179,51 +203,66 @@ void fmms_cutlass_stage1(
     int num_samples = max_out.size(2);
     int n_tiles_v = (V + TILE_V - 1) / TILE_V;
 
-    // Read temperature on GPU (avoid CPU-GPU sync)
-    float inv_temperature;
-    {
-        float temp_val;
-        cudaMemcpy(&temp_val, temperature.data_ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost);
-        inv_temperature = 1.0f / temp_val;
-    }
-
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    // ── Stage 1a: Single CUTLASS GEMM for the full matmul ──
+    // ── Stage 1a: CUTLASS 3.x GEMM ──
     // logits = weights [V, D] @ hidden_states.T [D, H] -> [V, H]
     auto logits = torch::empty({V, H}, torch::dtype(torch::kFloat32).device(weights.device()));
 
-    typename Gemm::Arguments args(
-        {V, H, D},                                  // Problem size (M, N, K)
-        {reinterpret_cast<ElementA*>(
-            weights.data_ptr<at::BFloat16>()),
-         D},                                         // A: ptr + stride (row-major ld=D)
-        {reinterpret_cast<ElementB*>(
-            hidden_states.data_ptr<at::BFloat16>()),
-         D},                                         // B: ptr + stride (col-major ld=D)
-        {reinterpret_cast<ElementC*>(
-            logits.data_ptr<float>()),
-         H},                                         // C: ptr + stride
-        {reinterpret_cast<ElementC*>(
-            logits.data_ptr<float>()),
-         H},                                         // D: ptr + stride (same as C)
-        {1.0f, 0.0f}                                 // alpha=1, beta=0
-    );
+    // Construct packed strides manually (make_cute_packed_stride not available
+    // in this CUTLASS version). Stride types are rank-3: [primary, secondary, batch].
+    // Int<1> elements are compile-time constants (stride-1 dimension).
+    StrideA stride_A{int64_t(D), {}, int64_t(0)};   // A [V, D] RowMajor: V_stride=D, D_stride=1
+    StrideB stride_B{int64_t(D), {}, int64_t(0)};   // B [H, D] ColMajor: H_stride=D, D_stride=1
+    StrideC stride_C{int64_t(H), {}, int64_t(0)};   // C [V, H] RowMajor: V_stride=H, H_stride=1
+    StrideD stride_D{int64_t(H), {}, int64_t(0)};   // D [V, H] RowMajor: V_stride=H, H_stride=1
+
+    int device_id = weights.get_device();
+    cutlass::KernelHardwareInfo hw_info;
+    hw_info.device_id = device_id;
+    hw_info.sm_count = cutlass::KernelHardwareInfo::query_device_multiprocessor_count(device_id);
+
+    typename Gemm::Arguments arguments{
+        cutlass::gemm::GemmUniversalMode::kGemm,
+        {V, H, D},                                     // problem shape (M, N, K)
+        {                                               // mainloop args
+            reinterpret_cast<ElementA const*>(weights.data_ptr<at::BFloat16>()),
+            stride_A,
+            reinterpret_cast<ElementB const*>(hidden_states.data_ptr<at::BFloat16>()),
+            stride_B
+        },
+        {                                               // epilogue args
+            {},                                         // thread args (set below)
+            reinterpret_cast<ElementC const*>(logits.data_ptr<float>()),  // C ptr (unused, beta=0)
+            stride_C,
+            reinterpret_cast<ElementD*>(logits.data_ptr<float>()),        // D ptr (output)
+            stride_D
+        },
+        hw_info
+    };
+    arguments.epilogue.thread.alpha = 1.0f;
+    arguments.epilogue.thread.beta = 0.0f;
 
     Gemm gemm_op;
-    cutlass::Status status = gemm_op.can_implement(args);
+
+    cutlass::Status status = gemm_op.can_implement(arguments);
     TORCH_CHECK(status == cutlass::Status::kSuccess,
-        "CUTLASS GEMM cannot be implemented for these dimensions: ",
+        "CUTLASS 3.x GEMM cannot be implemented: ",
         cutlass::cutlassGetStatusString(status));
 
-    status = gemm_op.initialize(args, nullptr, stream);
+    size_t workspace_size = Gemm::get_workspace_size(arguments);
+    auto workspace = torch::empty(
+        {static_cast<int64_t>(workspace_size)},
+        torch::dtype(torch::kUInt8).device(weights.device()));
+
+    status = gemm_op.initialize(arguments, workspace.data_ptr(), stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess,
-        "CUTLASS GEMM initialization failed: ",
+        "CUTLASS 3.x GEMM initialization failed: ",
         cutlass::cutlassGetStatusString(status));
 
-    status = gemm_op(stream);
+    status = gemm_op.run(stream);
     TORCH_CHECK(status == cutlass::Status::kSuccess,
-        "CUTLASS GEMM execution failed: ",
+        "CUTLASS 3.x GEMM execution failed: ",
         cutlass::cutlassGetStatusString(status));
 
     // ── Stage 1b: Gumbel noise + tiled argmax ──
@@ -233,7 +272,7 @@ void fmms_cutlass_stage1(
         logits.data_ptr<float>(),
         max_out.data_ptr<float>(),
         max_out_idx.data_ptr<int64_t>(),
-        inv_temperature,
+        temperature.data_ptr<float>(),
         V,
         H,
         num_samples,
@@ -244,5 +283,5 @@ void fmms_cutlass_stage1(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("fmms_cutlass_stage1", &fmms_cutlass_stage1,
-          "FMMS Stage 1 using CUTLASS GEMM + Gumbel argmax (CUDA)");
+          "FMMS Stage 1 using CUTLASS 3.x GEMM + Gumbel argmax (SM90)");
 }

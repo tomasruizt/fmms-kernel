@@ -7,7 +7,7 @@ args = Args(n_hidden_states=4, tgt_dir=Path(volume_path) / "speed-test")
 app = make_app()
 
 
-@app.function(gpu="H100", image=make_image(), volumes=make_volumes())
+@app.function(gpu="H100", image=make_image(), volumes=make_volumes(), timeout=20 * 60)
 def speed_test(args: Args):
     run_speed_test(args)
 

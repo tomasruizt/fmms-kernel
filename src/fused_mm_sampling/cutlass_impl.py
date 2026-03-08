@@ -1,13 +1,14 @@
-"""CUTLASS implementation of the FMMS kernel.
+"""CUTLASS 3.x implementation of the FMMS kernel (SM90+).
 
-Uses CUTLASS GEMM (tensor cores) for the matmul, followed by a custom
-Gumbel-max sampling kernel. Stage 2 reduction is done in Python
-(identical to the Triton and CUDA wrappers).
+Uses CUTLASS 3.x GemmUniversal with collective builders and TMA for the
+matmul, followed by a custom Gumbel-max sampling kernel. Stage 2 reduction
+is done in Python (identical to the Triton and CUDA wrappers).
 
 Requirements:
+  - SM90+ GPU (H100 or newer).
   - CUTLASS 3.x headers: pip install nvidia-cutlass
     OR set CUTLASS_PATH to the CUTLASS include directory.
-  - CUDA toolkit with nvcc supporting the target GPU's SM version.
+  - CUDA toolkit with nvcc supporting compute_90a.
 """
 
 import os
@@ -66,6 +67,13 @@ def _get_module():
 
     cutlass_include = _get_cutlass_include()
     sm = _sm_version()
+    sm_int = int(sm)
+
+    if sm_int < 90:
+        raise RuntimeError(f"CUTLASS 3.x FMMS kernel requires SM90+ (H100 or newer), got SM{sm}")
+
+    # SM90+ needs the 'a' suffix for TMA/WGMMA instructions
+    sm_gencode = f"{sm}a"
 
     _module = load(
         name="fmms_cutlass",
@@ -74,7 +82,7 @@ def _get_module():
         extra_cuda_cflags=[
             "-O3",
             "--use_fast_math",
-            f"-gencode=arch=compute_{sm},code=sm_{sm}",
+            f"-gencode=arch=compute_{sm_gencode},code=sm_{sm_gencode}",
             "-std=c++17",
         ],
         verbose=os.environ.get("FMMS_CUDA_VERBOSE", "") == "1",

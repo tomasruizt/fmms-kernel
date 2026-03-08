@@ -14,6 +14,9 @@ def make_image():
         "matplotlib",
         "nvtx",
         "llnl-hatchet",
+        "nvidia-cutlass",
+        "cuda-bench",
+        "cupti-python",
     ]
     return img.uv_pip_install(deps)
 
