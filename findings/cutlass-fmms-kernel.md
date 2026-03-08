@@ -96,9 +96,33 @@ Build the custom `VisitorRowArgmax` visitor. Split into sub-steps:
 
 **5c: Add Gumbel noise with Philox RNG.** Derive global `(v, h)` coordinates from the epilogue's coordinate tensors to seed the RNG deterministically. Use the existing chi-squared distribution tests to prove sampling correctness.
 
+**Done.** Key implementation details:
+- Lightweight Philox-2x32-10 RNG implemented directly in `sm90_row_argmax.hpp` (avoids expensive `curand_init` per element). Uses `(seed, global_m, global_n)` as counter/key inputs.
+- `gumbel_noise()` function: generates uniform float via Philox, clamps to `[1e-10, 1)`, applies double-log transform.
+- Gumbel noise is always applied (not optional). The seed controls RNG determinism.
+- Global N coordinate computed from `tCcAcc_mn` (accumulator-layout coordinates), same approach as global M.
+- New `fused-cutlass-evt` provider registered in `core.py`, uses `fused_mm_sample_cutlass_evt()` which runs the EVT GEMM once per sample.
+- Sampling correctness validated via chi-squared distribution tests on Modal H100 (`test_evt --test sampling-evt`).
+- `inv_temperature` passed as a 0-d GPU tensor (device pointer). The visitor reads it via `__ldg()`, cached in a register in the `ConsumerStoreCallbacks` constructor. No GPU-CPU synchronization.
+- Philox RNG uses CUDA's built-in `curand_Philox4x32_10` (from `curand_philox4x32_x.h`) for correctness.
+- JIT cache invalidation: header content hash is included in the extension name (`fmms_cutlass_{hash}`) so changes to `.hpp` files trigger recompilation (torch only tracks files listed in `sources=`).
+
+**Performance (V=151,936, D=4,096, H=4, Modal H100):**
+- fused-triton: 0.428 ms
+- fused-cutlass (2-kernel): 0.490 ms
+- fused-cutlass-evt: 0.626 ms
+
+The EVT path is 0.136ms slower than the 2-kernel path despite eliminating the sampling kernel. Root causes:
+1. **D output write is unavoidable.** `void` as ElementD causes compile errors in the TmaWarpSpecialized epilogue builder (`sm90_builder.inl` tries to compute smem layout for void element type, hitting a `% 0` divide). The dummy `[V, H]` logits buffer is still written.
+2. **EVT epilogue overhead.** The visitor's reduction workspace writes, warp shuffles, and per-tile gmem copies add latency inside the epilogue pipeline. The separate `gumbel_argmax_kernel` is simpler and only adds ~0.008ms to the GEMM.
+
+**Tile shape investigation:** Originally the EVT used `TileShape_EVT` (64x64x64) because `TmaWarpSpecialized` hard-caps epilogue M at 64. Switching to `TmaWarpSpecializedCooperative` allows the full 128x128x64 tile (cooperative supports epilogue M=128). This improved performance from 0.690ms to 0.626ms. The previous 0.690ms result was from a stale JIT cache that loaded the old 64x64 kernel.
+
+The EVT approach cannot beat the 2-kernel path until the D output write is eliminated. CUTLASS 4.3.5 documents `void` D support but the implementation has a bug with `TmaWarpSpecialized`/`TmaWarpSpecializedCooperative` + EVT. Possible workarounds: (a) use `Sm90NoSmemWarpSpecialized` epilogue schedule, (b) patch the builder to skip smem layout computation for void elements, (c) upgrade CUTLASS.
+
 ### Step 6: Integrate EVT epilogue into the `fused-cutlass` provider
 
-Replace the 2-kernel path in `fmms_cutlass_stage1` (GEMM → full logits → `gumbel_argmax_kernel`) with the single-kernel EVT approach. The EVT epilogue (from steps 5a-c) performs temperature scaling, Gumbel noise, and per-tile argmax inside the GEMM epilogue, eliminating the intermediate `[V, H]` logits buffer. The Python wrapper reduces across V-tiles (same as `test_row_argmax` today). After this step, `gumbel_argmax_kernel` and `tile_argmax_kernel` can be deleted.
+Blocked on eliminating the D output write. Until then, the 2-kernel path is faster. Keep the EVT code for future use when the D store can be disabled.
 
 ### Known issues to fix early
 

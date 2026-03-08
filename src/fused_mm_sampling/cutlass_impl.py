@@ -74,7 +74,11 @@ def _get_module():
 
     # SM90+ needs the 'a' suffix for TMA/WGMMA instructions
     sm_gencode = f"{sm}a"
-    name = "fmms_cutlass"
+
+    # Include header content in the extension name hash so changes to .hpp
+    # files invalidate the JIT cache (torch only tracks files in sources=).
+    header_hash = _csrc_headers_hash()
+    name = f"fmms_cutlass_{header_hash}"
 
     import time
 
@@ -108,6 +112,16 @@ def _find_cached_so(name: str) -> Path | None:
     # torch appends _v{version} when sources change; glob for any version.
     matches = sorted(build_dir.parent.glob(f"{name}*/{name}*.so"))
     return matches[0] if matches else None
+
+
+def _csrc_headers_hash() -> str:
+    """Hash all .hpp files in csrc/ to detect header changes for JIT cache invalidation."""
+    import hashlib
+
+    h = hashlib.md5()
+    for hpp in sorted(_CSRC_DIR.glob("*.hpp")):
+        h.update(hpp.read_bytes())
+    return h.hexdigest()[:8]
 
 
 TILE_V = 128
@@ -144,23 +158,70 @@ def test_evt_row_reduce(
 def test_row_argmax(
     weights: torch.Tensor,  # [V, D] bfloat16
     hidden_states: torch.Tensor,  # [H, D] bfloat16
-    temperature: float = 1.0,
+    temperature: torch.Tensor,  # 0-d float32 GPU tensor
+    seed: int = 0,
 ) -> torch.Tensor:
-    """2-stage row argmax: GEMM + per-tile argmax + Python reduction.
+    """2-stage Gumbel-max sampling: GEMM + per-tile argmax + Python reduction.
 
-    argmax_indices = argmax(matmul(weights, hidden_states.T) / temperature, dim=0)  shape [H]
-
-    Stage 1: CUTLASS GEMM with EVT epilogue does per-tile argmax (with
-    temperature scaling). No intermediate [V, H] logits buffer.
+    Stage 1: CUTLASS GEMM with EVT epilogue applies temperature scaling,
+    adds Gumbel noise, and computes per-tile argmax. No intermediate [V, H]
+    logits buffer.
     Stage 2: Python reduces across tiles to get the global argmax.
     """
     mod = _get_module()
-    inv_temperature = 1.0 / temperature
-    tile_max_vals, tile_max_idxs = mod.test_row_argmax(weights, hidden_states, inv_temperature)
+    inv_temperature = 1.0 / temperature  # 0-d GPU tensor
+    tile_max_vals, tile_max_idxs = mod.test_row_argmax(
+        weights, hidden_states, inv_temperature, seed
+    )
     # Stage 2: reduce across V-tiles
     best_tiles = tile_max_vals.argmax(dim=0)  # [H]
     argmax_idxs = tile_max_idxs.gather(0, best_tiles.unsqueeze(0).to(torch.int32)).squeeze(0)
     return argmax_idxs.to(torch.int64)
+
+
+def fused_mm_sample_cutlass_evt(
+    weights: torch.Tensor,  # [V, D] bfloat16
+    hidden_states: torch.Tensor,  # [H, D] bfloat16
+    num_samples: int,
+    temperature: torch.Tensor,  # scalar (0-d)
+    seed: int = 0,
+) -> torch.Tensor:
+    """Fused matrix-multiply & sampling using CUTLASS EVT (single kernel per sample).
+
+    The EVT epilogue fuses temperature scaling, Gumbel noise, and per-tile argmax
+    into the GEMM epilogue. No intermediate [V, H] logits buffer is allocated.
+    For num_samples > 1, runs the GEMM once per sample with different seeds.
+    """
+    V, D = weights.shape  # noqa: N806
+    H = hidden_states.shape[0]  # noqa: N806
+    assert hidden_states.shape[1] == D
+
+    # CUTLASS TMA requires D aligned to 8 for bf16 (16 bytes)
+    D_aligned = ((D + 7) // 8) * 8  # noqa: N806
+    if D_aligned != D:
+        weights = torch.nn.functional.pad(weights, (0, D_aligned - D))
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, D_aligned - D))
+
+    # Compute inv_temperature as a 0-d GPU tensor (no CPU-GPU sync)
+    if temperature.dtype != torch.float32:
+        temperature = temperature.float()
+    inv_temperature = 1.0 / temperature
+
+    mod = _get_module()
+
+    samples = torch.empty((H, num_samples), dtype=torch.int64, device=weights.device)
+
+    for s in range(num_samples):
+        sample_seed = seed + s * 1000003  # different seed per sample
+        tile_max_vals, tile_max_idxs = mod.test_row_argmax(
+            weights, hidden_states, inv_temperature, sample_seed
+        )
+        # Stage 2: reduce across V-tiles
+        best_tiles = tile_max_vals.argmax(dim=0)  # [H]
+        argmax_idxs = tile_max_idxs.gather(0, best_tiles.unsqueeze(0).to(torch.int32)).squeeze(0)
+        samples[:, s] = argmax_idxs.to(torch.int64)
+
+    return samples
 
 
 def fused_mm_sample_cutlass(

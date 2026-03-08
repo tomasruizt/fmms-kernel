@@ -237,6 +237,10 @@ using StrideD_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideD;
 // (value, index) pairs. Results are written to a gmem workspace buffer.
 // Cross-tile reduction is done by the host (Python) after the GEMM.
 //
+// Uses TmaWarpSpecializedCooperative to support the full 128x128x64 tile.
+// TmaWarpSpecialized caps epilogue M at 64, which forces a smaller tile.
+// Cooperative allows epilogue M=128, matching the mainloop tile.
+//
 // EVT tree:
 //   Sm90RowArgmax  →  writes per-tile (val, idx) to workspace
 //     └── Sm90AccFetch  →  provides accumulator values
@@ -244,7 +248,7 @@ using StrideD_RowReduce = typename Gemm_RowReduce::GemmKernel::StrideD;
 using RowArgmaxEVT = cutlass::epilogue::fusion::Sm90EVT<
     cutlass::epilogue::fusion::Sm90RowArgmax<
         0,                      // stages (must be 0)
-        TileShape_EVT,
+        TileShape,              // full 128x128x64 tile
         int32_t,                // output element type (argmax index)
         RoundStyle,
         Stride<_0, _1, _0>,    // StrideMNL: M=0 (reduced), N=1, L=0
@@ -255,12 +259,12 @@ using RowArgmaxEVT = cutlass::epilogue::fusion::Sm90EVT<
 
 using CollectiveEpilogue_Argmax = typename cutlass::epilogue::collective::CollectiveBuilder<
     cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape_EVT, ClusterShape,
+    TileShape, ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
     ElementAccumulator, ElementCompute,
     ElementC, LayoutC, AlignmentC_EVT,
     ElementD, LayoutD, AlignmentD_EVT,
-    cutlass::epilogue::TmaWarpSpecialized,
+    cutlass::epilogue::TmaWarpSpecializedCooperative,
     RowArgmaxEVT
 >::CollectiveOp;
 
@@ -269,7 +273,7 @@ using CollectiveMainloop_Argmax = typename cutlass::gemm::collective::Collective
     ElementA, LayoutA, AlignmentA,
     ElementB, LayoutB, AlignmentB,
     ElementAccumulator,
-    TileShape_EVT, ClusterShape,
+    TileShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
         static_cast<int>(sizeof(typename CollectiveEpilogue_Argmax::SharedStorage))>,
     cutlass::gemm::collective::KernelScheduleAuto
@@ -282,9 +286,6 @@ using GemmKernel_Argmax = cutlass::gemm::kernel::GemmUniversal<
 >;
 
 using Gemm_Argmax = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel_Argmax>;
-
-using StrideC_Argmax = typename Gemm_Argmax::GemmKernel::StrideC;
-using StrideD_Argmax = typename Gemm_Argmax::GemmKernel::StrideD;
 
 
 // ──────────────────── Per-tile argmax kernel (no noise) ────────────────────
@@ -752,10 +753,12 @@ std::vector<torch::Tensor> test_evt_row_reduce(
 std::vector<torch::Tensor> test_row_argmax(
     torch::Tensor weights,        // [V, D] bfloat16
     torch::Tensor hidden_states,  // [H, D] bfloat16
-    float inv_temperature = 1.0f
+    torch::Tensor inv_temperature, // 0-d float32 GPU tensor (1/temperature)
+    int64_t seed = 0
 ) {
     TORCH_CHECK(weights.is_cuda(), "weights must be CUDA");
     TORCH_CHECK(hidden_states.is_cuda(), "hidden_states must be CUDA");
+    TORCH_CHECK(inv_temperature.is_cuda(), "inv_temperature must be CUDA");
     TORCH_CHECK(weights.dtype() == torch::kBFloat16, "weights must be bfloat16");
     TORCH_CHECK(hidden_states.dtype() == torch::kBFloat16, "hidden_states must be bfloat16");
     TORCH_CHECK(weights.is_contiguous(), "weights must be contiguous");
@@ -779,16 +782,13 @@ std::vector<torch::Tensor> test_row_argmax(
 
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    // D output (required by collective builder but we don't need the full logits)
+    // D output (required by TmaWarpSpecialized epilogue builder; void D not supported)
     auto logits_dummy = torch::empty({V, H_padded}, torch::dtype(torch::kFloat32).device(weights.device()));
-
-    // Dummy argmax output for the visitor's ptr_row (not used for per-tile mode)
-    auto argmax_dummy = torch::empty({H_padded}, torch::dtype(torch::kInt32).device(weights.device()));
 
     StrideA stride_A{int64_t(D), {}, int64_t(0)};
     StrideA stride_B{int64_t(D), {}, int64_t(0)};
-    StrideC_Argmax stride_C{int64_t(H_padded), {}, int64_t(0)};
-    StrideD_Argmax stride_D{int64_t(H_padded), {}, int64_t(0)};
+    StrideC_EVT stride_C{int64_t(H_padded), {}, int64_t(0)};
+    StrideD_EVT stride_D{int64_t(H_padded), {}, int64_t(0)};
 
     int device_id = weights.get_device();
     cutlass::KernelHardwareInfo hw_info;
@@ -815,7 +815,7 @@ std::vector<torch::Tensor> test_row_argmax(
     };
 
     // ── Allocate per-tile output tensors ──
-    constexpr int tile_M_val = decltype(get<0>(TileShape_EVT{}))::value;
+    constexpr int tile_M_val = decltype(get<0>(TileShape{}))::value;
     int n_tiles_m = (V + tile_M_val - 1) / tile_M_val;
 
     auto tile_max_vals = torch::empty({n_tiles_m, H}, torch::dtype(torch::kFloat32).device(weights.device()));
@@ -824,13 +824,14 @@ std::vector<torch::Tensor> test_row_argmax(
     // EVT thread args: (AccFetch_args, RowArgmax_args)
     arguments.epilogue.thread = {
         {},  // AccFetch: no args
-        {    // RowArgmax: {ptr_row, dRow, ptr_tile_vals, ptr_tile_idxs, H, inv_temperature}
-            reinterpret_cast<int32_t*>(argmax_dummy.data_ptr<int32_t>()),
-            {},   // Stride<_0, _1, _0>{}
+        {    // RowArgmax: {ptr_row, dRow, ptr_tile_vals, ptr_tile_idxs, H, inv_temperature_ptr, seed}
+            nullptr,  // ptr_row (unused, kept for EVT API compat)
+            {},       // Stride<_0, _1, _0>{}
             tile_max_vals.data_ptr<float>(),
             tile_max_idxs.data_ptr<int32_t>(),
             H,
-            inv_temperature
+            inv_temperature.data_ptr<float>(),
+            static_cast<uint64_t>(seed)
         }
     };
 
@@ -869,5 +870,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Test EVT epilogue: returns (logits, max_per_column) where max is across V (SM90)");
     m.def("test_row_argmax", &test_row_argmax,
           "2-stage row argmax: GEMM + per-tile argmax, returns (tile_max_vals, tile_max_idxs) (SM90)",
-          py::arg("weights"), py::arg("hidden_states"), py::arg("inv_temperature") = 1.0f);
+          py::arg("weights"), py::arg("hidden_states"), py::arg("inv_temperature"),
+          py::arg("seed") = 0);
 }

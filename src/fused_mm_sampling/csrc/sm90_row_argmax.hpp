@@ -19,6 +19,24 @@
 #include "cute/tensor.hpp"
 #include "cutlass/epilogue/fusion/sm90_visitor_tma_warpspecialized.hpp"
 
+// ──────────────────── Philox RNG for Gumbel noise ────────────────────
+//
+// Uses curand_Philox4x32_10 directly (10 rounds of Philox) to generate
+// one uniform random float per (seed, m, n) triple. This avoids
+// curand_init() which does expensive skip-ahead computation per call.
+
+#include <curand_philox4x32_x.h>
+
+__device__ __forceinline__ float gumbel_noise(uint64_t seed, uint32_t m, uint32_t n) {
+    uint4 counter = {m, n, 0, 0};
+    uint2 key = {static_cast<uint32_t>(seed), static_cast<uint32_t>(seed >> 32)};
+    uint4 result = curand_Philox4x32_10(counter, key);
+    // Convert uint32 to float in (0, 1]: use top 24 bits (float has 24-bit mantissa)
+    float u = (result.x >> 8) * (1.0f / 16777216.0f);
+    u = fmaxf(u, 1e-10f);
+    return -__logf(-__logf(u));
+}
+
 namespace cutlass::epilogue::fusion {
 
 using namespace cute;
@@ -95,7 +113,8 @@ public:
         float* ptr_tile_vals = nullptr;   // [n_tiles_m, H] per-tile max values
         int32_t* ptr_tile_idxs = nullptr; // [n_tiles_m, H] per-tile argmax indices
         int H = 0;                        // number of valid N columns
-        float inv_temperature = 1.0f;     // 1/temperature for logit scaling
+        const float* inv_temperature_ptr = nullptr;  // device pointer: 1/temperature
+        uint64_t seed = 0;               // Philox RNG seed for Gumbel noise
     };
 
     struct Params {
@@ -105,7 +124,8 @@ public:
         float* ptr_tile_vals = nullptr;
         int32_t* ptr_tile_idxs = nullptr;
         int H = 0;
-        float inv_temperature = 1.0f;
+        const float* inv_temperature_ptr = nullptr;
+        uint64_t seed = 0;
     };
 
     template <class ProblemShape>
@@ -113,7 +133,7 @@ public:
     to_underlying_arguments(ProblemShape const& problem_shape, Arguments const& args, void* workspace) {
         ValIdx* reduction_buffer = reinterpret_cast<ValIdx*>(workspace);
         return {args.ptr_row, args.dRow, reduction_buffer,
-                args.ptr_tile_vals, args.ptr_tile_idxs, args.H, args.inv_temperature};
+                args.ptr_tile_vals, args.ptr_tile_idxs, args.H, args.inv_temperature_ptr, args.seed};
     }
 
     template <class ProblemShape>
@@ -166,10 +186,12 @@ public:
         CUTLASS_DEVICE
         ConsumerStoreCallbacks(ArgsTuple&& args_tuple, Params const& params)
             : args_tuple(cute::forward<ArgsTuple>(args_tuple)),
-              params(params) {}
+              params(params),
+              inv_temperature(__ldg(params.inv_temperature_ptr)) {}
 
         ArgsTuple args_tuple;
         Params const& params;
+        float inv_temperature;  // cached in register from device pointer
 
         // visit(): accumulate (value, global_m_index) pairs into register reduction tensor.
         template <typename ElementAccumulator, typename... ElementInputs, int FragmentSize>
@@ -194,14 +216,22 @@ public:
             constexpr int cta_tile_M = decltype(get<0>(CtaTileShapeMNK{}))::value;
             int32_t m_offset = static_cast<int32_t>(m) * cta_tile_M;
 
+            constexpr int cta_tile_N = decltype(get<1>(CtaTileShapeMNK{}))::value;
+            int32_t n_offset = static_cast<int32_t>(n) * cta_tile_N;
+
             CUTLASS_PRAGMA_UNROLL
             for (int i = 0; i < FragmentSize; ++i) {
                 int coord_idx = epi_v * FragmentSize + i;
                 if (elem_less(tCcRow_mn(coord_idx), residue_tCcRow)) {
-                    float value = static_cast<float>(frg_input[i]) * params.inv_temperature;
-                    // Use accumulator-layout coordinates for M index
+                    float value = static_cast<float>(frg_input[i]) * inv_temperature;
+                    // Use accumulator-layout coordinates for M and N indices
                     int32_t local_m = static_cast<int32_t>(get<0>(tCcAcc_mn(coord_idx)));
                     int32_t global_m = m_offset + local_m;
+                    // Add Gumbel noise for sampling
+                    int32_t local_n = static_cast<int32_t>(get<1>(tCcAcc_mn(coord_idx)));
+                    int32_t global_n = n_offset + local_n;
+                    value += gumbel_noise(params.seed,
+                        static_cast<uint32_t>(global_m), static_cast<uint32_t>(global_n));
                     ValIdx candidate = {value, global_m};
                     ValIdx& current = tCrRow_mn(coord_idx);
                     current = reduce_input(current, candidate);

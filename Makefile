@@ -18,7 +18,7 @@ modal-speed-test:
 	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test $(if $(NAME),--name "$(NAME)",)
 
 modal-speed-test-cutlass:
-	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test --name "fused-triton,fused-cutlass"
+	modal run -m src.fused_mm_sampling.modal_lib.modal_speed_test --name "fused-triton,fused-cutlass,fused-cutlass-evt"
 
 modal-triton-benchmark: modal-create-results-triton-bench modal-get-results-triton-bench modal-plot-triton-bench
 
