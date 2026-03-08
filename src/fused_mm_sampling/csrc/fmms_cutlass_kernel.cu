@@ -751,7 +751,8 @@ std::vector<torch::Tensor> test_evt_row_reduce(
 
 std::vector<torch::Tensor> test_row_argmax(
     torch::Tensor weights,        // [V, D] bfloat16
-    torch::Tensor hidden_states   // [H, D] bfloat16
+    torch::Tensor hidden_states,  // [H, D] bfloat16
+    float inv_temperature = 1.0f
 ) {
     TORCH_CHECK(weights.is_cuda(), "weights must be CUDA");
     TORCH_CHECK(hidden_states.is_cuda(), "hidden_states must be CUDA");
@@ -823,12 +824,13 @@ std::vector<torch::Tensor> test_row_argmax(
     // EVT thread args: (AccFetch_args, RowArgmax_args)
     arguments.epilogue.thread = {
         {},  // AccFetch: no args
-        {    // RowArgmax: {ptr_row, dRow, ptr_tile_vals, ptr_tile_idxs, H}
+        {    // RowArgmax: {ptr_row, dRow, ptr_tile_vals, ptr_tile_idxs, H, inv_temperature}
             reinterpret_cast<int32_t*>(argmax_dummy.data_ptr<int32_t>()),
             {},   // Stride<_0, _1, _0>{}
             tile_max_vals.data_ptr<float>(),
             tile_max_idxs.data_ptr<int32_t>(),
-            H
+            H,
+            inv_temperature
         }
     };
 
@@ -866,5 +868,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("test_evt_row_reduce", &test_evt_row_reduce,
           "Test EVT epilogue: returns (logits, max_per_column) where max is across V (SM90)");
     m.def("test_row_argmax", &test_row_argmax,
-          "2-stage row argmax: GEMM + per-tile argmax, returns (tile_max_vals, tile_max_idxs) (SM90)");
+          "2-stage row argmax: GEMM + per-tile argmax, returns (tile_max_vals, tile_max_idxs) (SM90)",
+          py::arg("weights"), py::arg("hidden_states"), py::arg("inv_temperature") = 1.0f);
 }

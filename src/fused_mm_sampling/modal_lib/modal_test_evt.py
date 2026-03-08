@@ -1,7 +1,26 @@
 """Test EVT epilogues on Modal H100 (SM90+)."""
 
+from dataclasses import dataclass
+
 from ..testing import assert_sampling_distribution
 from .utils import clear_cuda_jit_cache, enable_cuda_jit_cache, make_app, make_image, make_volumes
+
+
+@dataclass
+class CaseArgs:
+    V: int
+    D: int
+    H: int
+    temp: float = 1.0
+
+
+ARGMAX_CASES = [
+    CaseArgs(V=256, D=128, H=1),
+    CaseArgs(V=256, D=128, H=4),
+    CaseArgs(V=1024, D=256, H=7),
+    CaseArgs(V=151936, D=4096, H=4),
+    CaseArgs(V=151936, D=4096, H=4, temp=0.5),
+]
 
 app = make_app()
 
@@ -75,46 +94,47 @@ def run_test_evt_row_reduce():
 
 
 def run_test_evt_row_argmax():
+    for case in ARGMAX_CASES:
+        assert_row_argmax(case)
+    print("\nAll EVT row_argmax tests passed!")
+
+
+def assert_row_argmax(case: CaseArgs):
     import torch
 
     from ..cutlass_impl import test_row_argmax
 
     device = torch.device("cuda")
-    torch.manual_seed(42)
+    V, D, H, temperature = case.V, case.D, case.H, case.temp  # noqa: N806
+    weights = torch.randn(V, D, device=device, dtype=torch.bfloat16)
+    hidden_states = torch.randn(H, D, device=device, dtype=torch.bfloat16)
 
-    for V, D, H in [(256, 128, 1), (256, 128, 4), (1024, 256, 7), (151936, 4096, 4)]:  # noqa: N806
-        weights = torch.randn(V, D, device=device, dtype=torch.bfloat16)
-        hidden_states = torch.randn(H, D, device=device, dtype=torch.bfloat16)
+    result = test_row_argmax(weights, hidden_states, temperature=temperature)
 
-        result = test_row_argmax(weights, hidden_states)
+    # Reference: matmul, scale by 1/temperature, then argmax across V (dim=0)
+    ref_logits = weights.float() @ hidden_states.float().T
+    ref_scaled = ref_logits / temperature
+    ref_argmax = ref_scaled.argmax(dim=0)
 
-        # Reference: matmul then argmax across V (dim=0)
-        ref_logits = weights.float() @ hidden_states.float().T
-        ref_argmax = ref_logits.argmax(dim=0)
-
-        match = (result.long() == ref_argmax).all().item()
-        mismatches = (result.long() != ref_argmax).sum().item()
-        print(
-            f"EVT row_argmax: V={V}, D={D}, H={H}: "
-            f"match={match}, mismatches={mismatches} "
-            f"(result={result.shape}, dtype={result.dtype})"
-        )
-        if not match:
-            # Show details for debugging
-            for h in range(min(H, 8)):
-                if result[h].item() != ref_argmax[h].item():
-                    got_idx = result[h].item()
-                    want_idx = ref_argmax[h].item()
-                    got_val = ref_logits[got_idx, h].item()
-                    want_val = ref_logits[want_idx, h].item()
-                    print(
-                        f"  h={h}: got idx={got_idx} (val={got_val:.4f}), "
-                        f"want idx={want_idx} (val={want_val:.4f}), "
-                        f"diff={want_val - got_val:.6f}"
-                    )
-        assert match, f"EVT row_argmax failed: {mismatches}/{H} mismatches"
-
-    print("\nAll EVT row_argmax tests passed!")
+    match = (result.long() == ref_argmax).all().item()
+    mismatches = (result.long() != ref_argmax).sum().item()
+    print(
+        f"EVT row_argmax: V={V}, D={D}, H={H}, T={temperature}: "
+        f"match={match}, mismatches={mismatches}"
+    )
+    if not match:
+        for h in range(min(H, 8)):
+            if result[h].item() != ref_argmax[h].item():
+                got_idx = result[h].item()
+                want_idx = ref_argmax[h].item()
+                got_val = ref_scaled[got_idx, h].item()
+                want_val = ref_scaled[want_idx, h].item()
+                print(
+                    f"  h={h}: got idx={got_idx} (val={got_val:.4f}), "
+                    f"want idx={want_idx} (val={want_val:.4f}), "
+                    f"diff={want_val - got_val:.6f}"
+                )
+    assert match, f"EVT row_argmax failed: {mismatches}/{H} mismatches"
 
 
 def run_test_cutlass_sampling():

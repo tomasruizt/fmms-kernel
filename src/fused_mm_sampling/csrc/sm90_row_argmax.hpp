@@ -95,6 +95,7 @@ public:
         float* ptr_tile_vals = nullptr;   // [n_tiles_m, H] per-tile max values
         int32_t* ptr_tile_idxs = nullptr; // [n_tiles_m, H] per-tile argmax indices
         int H = 0;                        // number of valid N columns
+        float inv_temperature = 1.0f;     // 1/temperature for logit scaling
     };
 
     struct Params {
@@ -104,6 +105,7 @@ public:
         float* ptr_tile_vals = nullptr;
         int32_t* ptr_tile_idxs = nullptr;
         int H = 0;
+        float inv_temperature = 1.0f;
     };
 
     template <class ProblemShape>
@@ -111,7 +113,7 @@ public:
     to_underlying_arguments(ProblemShape const& problem_shape, Arguments const& args, void* workspace) {
         ValIdx* reduction_buffer = reinterpret_cast<ValIdx*>(workspace);
         return {args.ptr_row, args.dRow, reduction_buffer,
-                args.ptr_tile_vals, args.ptr_tile_idxs, args.H};
+                args.ptr_tile_vals, args.ptr_tile_idxs, args.H, args.inv_temperature};
     }
 
     template <class ProblemShape>
@@ -196,7 +198,7 @@ public:
             for (int i = 0; i < FragmentSize; ++i) {
                 int coord_idx = epi_v * FragmentSize + i;
                 if (elem_less(tCcRow_mn(coord_idx), residue_tCcRow)) {
-                    float value = static_cast<float>(frg_input[i]);
+                    float value = static_cast<float>(frg_input[i]) * params.inv_temperature;
                     // Use accumulator-layout coordinates for M index
                     int32_t local_m = static_cast<int32_t>(get<0>(tCcAcc_mn(coord_idx)));
                     int32_t global_m = m_offset + local_m;

@@ -144,17 +144,19 @@ def test_evt_row_reduce(
 def test_row_argmax(
     weights: torch.Tensor,  # [V, D] bfloat16
     hidden_states: torch.Tensor,  # [H, D] bfloat16
+    temperature: float = 1.0,
 ) -> torch.Tensor:
     """2-stage row argmax: GEMM + per-tile argmax + Python reduction.
 
-    argmax_indices = argmax(matmul(weights, hidden_states.T), dim=0)  shape [H]
+    argmax_indices = argmax(matmul(weights, hidden_states.T) / temperature, dim=0)  shape [H]
 
-    Stage 1: CUTLASS GEMM produces logits [V, H], then a per-tile argmax
-    kernel reduces each tile of TILE_V rows to (max_val, argmax_idx).
+    Stage 1: CUTLASS GEMM with EVT epilogue does per-tile argmax (with
+    temperature scaling). No intermediate [V, H] logits buffer.
     Stage 2: Python reduces across tiles to get the global argmax.
     """
     mod = _get_module()
-    tile_max_vals, tile_max_idxs = mod.test_row_argmax(weights, hidden_states)
+    inv_temperature = 1.0 / temperature
+    tile_max_vals, tile_max_idxs = mod.test_row_argmax(weights, hidden_states, inv_temperature)
     # Stage 2: reduce across V-tiles
     best_tiles = tile_max_vals.argmax(dim=0)  # [H]
     argmax_idxs = tile_max_idxs.gather(0, best_tiles.unsqueeze(0).to(torch.int32)).squeeze(0)

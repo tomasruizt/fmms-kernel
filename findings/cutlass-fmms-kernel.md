@@ -85,7 +85,14 @@ Build the custom `VisitorRowArgmax` visitor. Split into sub-steps:
 - Warp shuffle reduction uses `__shfl_xor_sync` / `__shfl_down_sync` with `uint64_t` reinterpretation of `ValIdx`.
 - Verified on Modal H100: all tests pass (V=256/1024/151936, H=1/4/7).
 
-**5b: Add temperature scaling.** Pass `inv_temperature` as a scalar broadcast. Verify logits are scaled correctly.
+**5b: Add temperature scaling.** ✅ Pass `inv_temperature` as a parameter to the argmax visitor. Verify logits are scaled correctly before argmax.
+
+**Done.** Key implementation details:
+- Added `inv_temperature` field to `Sm90RowArgmax::Arguments` and `Params` with default `1.0f` (backward compatible with existing no-temperature tests).
+- Scaling applied in `visit()`: `float value = static_cast<float>(frg_input[i]) * params.inv_temperature`.
+- Simpler than using `Sm90ScalarBroadcast` in the EVT tree (no extra EVT node, no restructuring).
+- Python wrapper computes `inv_temperature = 1.0 / temperature` and passes it to the C++ function.
+- Verified on Modal H100: all tests pass (V=256/1024/151936, H=1/4/7, T=0.5/1.0).
 
 **5c: Add Gumbel noise with Philox RNG.** Derive global `(v, h)` coordinates from the epilogue's coordinate tensors to seed the RNG deterministically. Use the existing chi-squared distribution tests to prove sampling correctness.
 
