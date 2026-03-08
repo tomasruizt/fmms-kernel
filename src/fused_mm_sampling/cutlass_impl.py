@@ -28,13 +28,11 @@ def _get_cutlass_include():
     if cutlass_path:
         return cutlass_path
 
-    # Try nvidia-cutlass pip package
+    # Try nvidia-cutlass pip package (headers live in cutlass_library/source/include/)
     try:
-        import cutlass
+        import cutlass_library
 
-        pkg_dir = Path(cutlass.__file__).resolve().parent
-        # nvidia-cutlass installs headers under the package
-        include_dir = pkg_dir / "include"
+        include_dir = Path(cutlass_library.__file__).resolve().parent / "source" / "include"
         if include_dir.exists():
             return str(include_dir)
     except ImportError:

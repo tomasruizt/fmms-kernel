@@ -1,16 +1,17 @@
 // Fused Matrix-Multiply & Sampling (FMMS) — CUTLASS implementation
 //
-// Uses CUTLASS GEMM with tensor cores for the matmul, then a custom
-// Gumbel-max sampling kernel on the resulting logits tile.
+// Single CUTLASS GEMM for the full matmul, then a tiled Gumbel-max
+// sampling kernel on the resulting logits.
 //
 // Two-stage approach (same as Triton/CUDA variants):
-//   Stage 1a: CUTLASS GEMM — logits_tile = W_tile @ hs.T  (per V-tile)
-//   Stage 1b: Custom kernel — scale by temperature, add Gumbel noise, argmax
+//   Stage 1a: CUTLASS GEMM — logits = W @ hs.T  (single launch)
+//   Stage 1b: Custom kernel — scale by temperature, add Gumbel noise, tiled argmax
 //   Stage 2:  Python-side reduction across V-tiles
 //
 // Requires: CUTLASS 3.x headers (pip install nvidia-cutlass or set CUTLASS_PATH)
 
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <curand_kernel.h>
 
@@ -23,27 +24,32 @@
 
 // ──────────────────────── constants ────────────────────────
 
-static constexpr int TILE_V = 128;   // V-tile size (matches other implementations)
+static constexpr int TILE_V = 128;   // V-tile size for sampling (matches other implementations)
 static constexpr int SAMPLING_THREADS = 256;
 
 // ──────────────────────── CUTLASS GEMM type aliases ────────────────────────
 
-// GEMM: [TILE_V, D] x [D, H] -> [TILE_V, H]
-// A = weights_tile: [TILE_V, D], row-major, bfloat16
+// GEMM: [V, D] x [D, H] -> [V, H]
+// A = weights: [V, D], row-major, bfloat16
 // B = hidden_states^T: [D, H], column-major (i.e. hidden_states [H, D] row-major)
-// C = logits_tile: [TILE_V, H], row-major, float32
+// C = logits: [V, H], row-major, float32
 
 using ElementA = cutlass::bfloat16_t;
 using ElementB = cutlass::bfloat16_t;
 using ElementC = float;
 using ElementAccumulator = float;
 
-using LayoutA = cutlass::layout::RowMajor;     // W_tile [TILE_V, D]
+using LayoutA = cutlass::layout::RowMajor;     // W [V, D]
 using LayoutB = cutlass::layout::ColumnMajor;   // hs [H, D] row-major = [D, H] col-major
-using LayoutC = cutlass::layout::RowMajor;      // logits [TILE_V, H]
+using LayoutC = cutlass::layout::RowMajor;      // logits [V, H]
 
-// Use the default GEMM configuration for SM80+ (tensor cores)
-// ThreadblockShape, WarpShape, InstructionShape are tuned for bf16 on Ampere/Hopper
+// Alignment of 8 elements (16 bytes for bf16) for efficient cp_async in the
+// multistage pipeline. This constrains the K dimension (D) to be divisible by 8,
+// which holds for all LLM hidden sizes (2048, 4096, 8192, ...).
+static constexpr int kAlignmentA = 8;
+static constexpr int kAlignmentB = 8;
+static constexpr int kEpilogueElements = 1;
+
 using Gemm = cutlass::gemm::device::Gemm<
     ElementA, LayoutA,          // A matrix
     ElementB, LayoutB,          // B matrix
@@ -56,51 +62,48 @@ using Gemm = cutlass::gemm::device::Gemm<
     cutlass::gemm::GemmShape<16, 8, 16>,     // MMA instruction (bf16 tensor core)
     cutlass::epilogue::thread::LinearCombination<
         ElementC,               // Output type
-        128 / cutlass::sizeof_bits<ElementC>::value,  // Elements per access
+        kEpilogueElements,      // Elements per access (1 for arbitrary H)
         ElementAccumulator,     // Accumulator type
         ElementAccumulator      // Compute type
     >,
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-    3                           // Pipeline stages
+    3,                          // Pipeline stages
+    kAlignmentA,                // A alignment
+    kAlignmentB                 // B alignment
 >;
 
 
-// ──────────────────── Gumbel noise + argmax kernel ────────────────────
+// ──────────────────── Gumbel noise + tiled argmax kernel ────────────────────
 
-// After CUTLASS GEMM produces logits_tile [TILE_V, H], this kernel:
-//   1. Scales by 1/temperature
-//   2. Adds Gumbel noise: -log(-log(u)), u ~ Uniform(0,1)
-//   3. Computes argmax across the V-tile dimension
-//   4. Writes (max_val, max_idx) for each (h, sample)
+// Operates on the full logits [V, H] buffer. Each thread block handles one
+// (tile_id, h_idx) pair, reducing TILE_V rows to a single (max_val, max_idx).
 //
-// Grid: (H,)   Block: (SAMPLING_THREADS,)
-// Each thread block handles one hidden state across all V in the tile.
+// Grid: (n_tiles_v, H)   Block: (SAMPLING_THREADS,)
 
 __global__ void gumbel_argmax_kernel(
-    const float* __restrict__ logits_tile,  // [tile_v_size, H], row-major
-    float*       __restrict__ max_out,      // [H, num_samples]
-    int64_t*     __restrict__ max_out_idx,  // [H, num_samples]
+    const float* __restrict__ logits,       // [V, H], row-major
+    float*       __restrict__ max_out,      // [n_tiles_v, H, num_samples]
+    int64_t*     __restrict__ max_out_idx,  // [n_tiles_v, H, num_samples]
     float inv_temperature,
-    int tile_v_size,                        // actual rows in this tile (<= TILE_V)
+    int V,
     int H,                                  // number of hidden states (stride)
     int num_samples,
-    int v_offset,                           // global vocab offset for this tile
-    unsigned long long base_seed,
-    int tile_id                             // for unique RNG sequences
+    unsigned long long base_seed
 ) {
-    const int h_idx = blockIdx.x;
+    const int tile_id = blockIdx.x;
+    const int h_idx = blockIdx.y;
     if (h_idx >= H) return;
 
+    const int v_offset = tile_id * TILE_V;
+    const int tile_v_size = min(TILE_V, V - v_offset);
     const int tid = threadIdx.x;
 
-    // Each sample is processed sequentially (num_samples is typically 1)
     for (int s = 0; s < num_samples; s++) {
         float best_val = -INFINITY;
         int best_global_idx = -1;
 
-        // Each thread processes multiple V rows in a strided loop
         for (int v = tid; v < tile_v_size; v += SAMPLING_THREADS) {
-            float logit = logits_tile[v * H + h_idx] * inv_temperature;
+            float logit = logits[(v_offset + v) * H + h_idx] * inv_temperature;
 
             // Gumbel noise
             unsigned long long seq = (unsigned long long)tile_id * 100000ULL
@@ -140,7 +143,7 @@ __global__ void gumbel_argmax_kernel(
 
         // Thread 0 writes the result
         if (tid == 0) {
-            int64_t out_offset = (int64_t)h_idx * num_samples + s;
+            int64_t out_offset = ((int64_t)tile_id * H + h_idx) * num_samples + s;
             max_out[out_offset] = smem_vals[0];
             max_out_idx[out_offset] = smem_idxs[0];
         }
@@ -184,76 +187,58 @@ void fmms_cutlass_stage1(
         inv_temperature = 1.0f / temp_val;
     }
 
-    // Allocate workspace for one tile's logits
-    auto logits_tile = torch::empty({TILE_V, H}, torch::dtype(torch::kFloat32).device(weights.device()));
-
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    for (int tile_id = 0; tile_id < n_tiles_v; tile_id++) {
-        int v_offset = tile_id * TILE_V;
-        int tile_v_size = std::min(TILE_V, V - v_offset);
+    // ── Stage 1a: Single CUTLASS GEMM for the full matmul ──
+    // logits = weights [V, D] @ hidden_states.T [D, H] -> [V, H]
+    auto logits = torch::empty({V, H}, torch::dtype(torch::kFloat32).device(weights.device()));
 
-        // ── Stage 1a: CUTLASS GEMM ──
-        // A = weights_tile [tile_v_size, D] row-major (pointer offset into weights)
-        // B = hidden_states [H, D] row-major = [D, H] column-major
-        // C = logits_tile [tile_v_size, H] row-major
+    typename Gemm::Arguments args(
+        {V, H, D},                                  // Problem size (M, N, K)
+        {reinterpret_cast<ElementA*>(
+            weights.data_ptr<at::BFloat16>()),
+         D},                                         // A: ptr + stride (row-major ld=D)
+        {reinterpret_cast<ElementB*>(
+            hidden_states.data_ptr<at::BFloat16>()),
+         D},                                         // B: ptr + stride (col-major ld=D)
+        {reinterpret_cast<ElementC*>(
+            logits.data_ptr<float>()),
+         H},                                         // C: ptr + stride
+        {reinterpret_cast<ElementC*>(
+            logits.data_ptr<float>()),
+         H},                                         // D: ptr + stride (same as C)
+        {1.0f, 0.0f}                                 // alpha=1, beta=0
+    );
 
-        typename Gemm::Arguments args(
-            {tile_v_size, H, D},                    // Problem size (M, N, K)
-            {reinterpret_cast<ElementA*>(
-                weights.data_ptr<at::BFloat16>()) + (int64_t)v_offset * D,
-             D},                                     // A: ptr + stride (row-major ld=D)
-            {reinterpret_cast<ElementB*>(
-                hidden_states.data_ptr<at::BFloat16>()),
-             D},                                     // B: ptr + stride (col-major ld=D)
-            {reinterpret_cast<ElementC*>(
-                logits_tile.data_ptr<float>()),
-             H},                                     // C: ptr + stride
-            {reinterpret_cast<ElementC*>(
-                logits_tile.data_ptr<float>()),
-             H},                                     // D: ptr + stride (same as C)
-            {1.0f, 0.0f}                             // alpha=1, beta=0
-        );
+    Gemm gemm_op;
+    cutlass::Status status = gemm_op.can_implement(args);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS GEMM cannot be implemented for these dimensions: ",
+        cutlass::cutlassGetStatusString(status));
 
-        Gemm gemm_op;
-        cutlass::Status status = gemm_op.can_implement(args);
-        TORCH_CHECK(status == cutlass::Status::kSuccess,
-            "CUTLASS GEMM cannot be implemented for these dimensions: ",
-            cutlass::cutlassGetStatusString(status));
+    status = gemm_op.initialize(args, nullptr, stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS GEMM initialization failed: ",
+        cutlass::cutlassGetStatusString(status));
 
-        status = gemm_op.initialize(args, nullptr, stream);
-        TORCH_CHECK(status == cutlass::Status::kSuccess,
-            "CUTLASS GEMM initialization failed: ",
-            cutlass::cutlassGetStatusString(status));
+    status = gemm_op(stream);
+    TORCH_CHECK(status == cutlass::Status::kSuccess,
+        "CUTLASS GEMM execution failed: ",
+        cutlass::cutlassGetStatusString(status));
 
-        status = gemm_op(stream);
-        TORCH_CHECK(status == cutlass::Status::kSuccess,
-            "CUTLASS GEMM execution failed: ",
-            cutlass::cutlassGetStatusString(status));
-
-        // ── Stage 1b: Gumbel noise + argmax ──
-        // max_out layout: [n_tiles_v, H, num_samples]
-        // For this tile: offset = tile_id * H * num_samples
-        float* tile_max_out = max_out.data_ptr<float>()
-            + (int64_t)tile_id * H * num_samples;
-        int64_t* tile_max_out_idx = max_out_idx.data_ptr<int64_t>()
-            + (int64_t)tile_id * H * num_samples;
-
-        dim3 grid(H);
-        dim3 block(SAMPLING_THREADS);
-        gumbel_argmax_kernel<<<grid, block, 0, stream>>>(
-            logits_tile.data_ptr<float>(),
-            tile_max_out,
-            tile_max_out_idx,
-            inv_temperature,
-            tile_v_size,
-            H,
-            num_samples,
-            v_offset,
-            static_cast<unsigned long long>(seed),
-            tile_id
-        );
-    }
+    // ── Stage 1b: Gumbel noise + tiled argmax ──
+    dim3 grid(n_tiles_v, H);
+    dim3 block(SAMPLING_THREADS);
+    gumbel_argmax_kernel<<<grid, block, 0, stream>>>(
+        logits.data_ptr<float>(),
+        max_out.data_ptr<float>(),
+        max_out_idx.data_ptr<int64_t>(),
+        inv_temperature,
+        V,
+        H,
+        num_samples,
+        static_cast<unsigned long long>(seed)
+    );
 }
 
 
