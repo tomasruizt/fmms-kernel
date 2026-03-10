@@ -39,6 +39,7 @@ dev = [
     "modal",
     "cuda-bench",
     "cupti-python",
+    "nvidia-cutlass",
 ]
 gen_inputs = [
     "transformers",
